@@ -4,4 +4,3 @@ pymupdf
 python-docx
 pillow
 pytesseract
-openai
