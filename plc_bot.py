@@ -2,8 +2,8 @@
 =============================================================
   AI Super Assistant — Telegram Bot + OpenRouter (FREE)
   Supports: PDF, Images, Word (.docx), Text, and more
-  Image Generation: OpenAI DALL-E 3
-  Text fallback: GPT-4o-mini (OpenAI) — always available
+  Image Generation: Google Gemini 2.5 Flash (FREE)
+  100% free — no paid APIs needed
 =============================================================
 
 REQUIREMENTS:
@@ -67,7 +67,6 @@ try:
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
-    print("WARNING: openai not installed. Run: pip install openai")
 
 
 # ---------------------------------------------
@@ -208,13 +207,16 @@ def ask_ai(session: dict, user_message: str) -> str:
 
     # Step 1 — Try 7 free OpenRouter models, twice, before giving up
     free_models = [
-        "qwen/qwen3-235b-a22b:free",
-        "qwen/qwen3.6-plus:free",
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "deepseek/deepseek-chat-v3-0324:free",
-        "mistralai/mistral-7b-instruct:free",
-        "google/gemma-3-27b-it:free",
-        "nousresearch/hermes-3-llama-3.1-405b:free",
+        # Tier 1 — best quality free models available April 2026
+        "meta-llama/llama-4-maverick:free",       # Meta Llama 4 — best overall free model
+        "deepseek/deepseek-chat-v3-0324:free",    # DeepSeek V3 — excellent reasoning
+        "nvidia/llama-3.1-nemotron-ultra-253b-v1:free",  # NVIDIA 253B — very powerful
+        "mistralai/mistral-small-3.1-24b-instruct:free", # Mistral Small 3.1 — fast & reliable
+        # Tier 2 — solid fallbacks
+        "meta-llama/llama-4-scout:free",          # Meta Llama 4 Scout — lighter version
+        "qwen/qwen3-235b-a22b:free",              # Qwen3 235B — strong multilingual
+        "google/gemma-3-27b-it:free",             # Google Gemma 3 27B
+        "meta-llama/llama-3.3-70b-instruct:free", # Llama 3.3 70B — proven reliable
     ]
 
     for attempt in range(2):
@@ -243,53 +245,39 @@ def ask_ai(session: dict, user_message: str) -> str:
             except Exception:
                 continue
 
-    # Step 2 — All free models failed: fall back to GPT-4o-mini (your existing OpenAI key)
-    # Almost always online, costs fractions of a cent per message
-    if OPENAI_AVAILABLE and OPENAI_KEY != "YOUR_OPENAI_KEY_HERE":
-        try:
-            logger.info("Free models exhausted — switching to gpt-4o-mini fallback")
-            client = openai.OpenAI(api_key=OPENAI_KEY)
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                timeout=60,
-            )
-            text = resp.choices[0].message.content.strip()
-            if text:
-                return text
-        except Exception as e:
-            logger.error(f"GPT-4o-mini fallback failed: {e}")
-
     return "All models are currently unavailable. Please try again in a moment!"
 
 
 # ---------------------------------------------
-#  IMAGE GENERATION — DALL-E 3
+#  IMAGE GENERATION — Gemini 2.5 Flash (FREE)
 # ---------------------------------------------
 
 def generate_image(prompt: str) -> tuple:
-    if not OPENAI_AVAILABLE:
-        return None, "openai package not installed. Run: pip install openai"
-    if OPENAI_KEY == "YOUR_OPENAI_KEY_HERE":
-        return None, "OpenAI API key not configured. Set OPENAI_KEY in your environment."
+    """
+    Generate an image using Google Gemini 2.5 Flash Image — completely free.
+    Get your free API key at: https://aistudio.google.com
+    Returns (image_bytes, prompt) on success, or (None, error_message) on failure.
+    """
+    if GEMINI_KEY == "YOUR_GEMINI_KEY_HERE":
+        return None, "Gemini API key not configured. Get a free key at aistudio.google.com and set GEMINI_KEY."
     try:
-        client = openai.OpenAI(api_key=OPENAI_KEY)
-        response = client.images.generate(
-            model="dall-e-3",
-            prompt=prompt,
-            size="1024x1024",
-            quality="standard",
-            n=1,
-        )
-        image_url      = response.data[0].url
-        revised_prompt = response.data[0].revised_prompt or prompt
-        return image_url, revised_prompt
-    except openai.AuthenticationError:
-        return None, "Invalid OpenAI API key. Check your OPENAI_KEY."
-    except openai.RateLimitError:
-        return None, "OpenAI rate limit reached. Wait a moment and try again."
-    except openai.BadRequestError as e:
-        return None, f"Request rejected by OpenAI (content policy): {e}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={GEMINI_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": f"Generate an image of: {prompt}"}]}],
+            "generationConfig": {"responseModalities": ["image", "text"]},
+        }
+        response = requests.post(url, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        # Extract the image bytes from the response
+        for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []):
+            if part.get("inlineData"):
+                import base64
+                img_bytes = base64.b64decode(part["inlineData"]["data"])
+                return img_bytes, prompt
+        return None, "No image returned by Gemini. Try a different prompt."
+    except requests.exceptions.Timeout:
+        return None, "Gemini image generation timed out. Try again."
     except Exception as e:
         return None, f"Image generation failed: {e}"
 
@@ -322,8 +310,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/reset - clear files and conversation\n"
         "/help  - show this help\n\n"
         f"Primary model : {MODEL} (free)\n"
-        "Fallback model: gpt-4o-mini (OpenAI)\n"
-        "Image model   : DALL-E 3 (OpenAI)",
+        "Fallback      : none (100% free)\n"
+        "Image model   : Gemini 2.5 Flash (free via Google AI Studio)",
     )
 
 async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -351,20 +339,16 @@ async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     await update.message.reply_text(f"Generating image for: {user_input}\nThis may take up to 20 seconds...")
-    image_url, info = generate_image(user_input)
-    if image_url is None:
+    img_bytes, info = generate_image(user_input)
+    if img_bytes is None:
         await update.message.reply_text(f"Image generation failed: {info}")
         return
     try:
-        img_resp = requests.get(image_url, timeout=60)
-        img_resp.raise_for_status()
-        img_bytes = io.BytesIO(img_resp.content)
-        img_bytes.name = "generated.png"
-        await update.message.reply_photo(photo=img_bytes, caption=f"Prompt: {info[:900]}")
+        buf = io.BytesIO(img_bytes)
+        buf.name = "generated.png"
+        await update.message.reply_photo(photo=buf, caption=f"Prompt: {user_input[:900]}")
     except Exception as e:
-        await update.message.reply_text(
-            f"Image generated! View it here:\n{image_url}\n\n(Direct send failed: {e})"
-        )
+        await update.message.reply_text(f"Failed to send image: {e}")
 
 
 # ---------------------------------------------
@@ -445,8 +429,8 @@ def main():
     print("=" * 50)
     print("  AI Assistant Bot starting...")
     print(f"  Primary model : {MODEL} (free)")
-    print(f"  Fallback model: gpt-4o-mini (OpenAI)")
-    print(f"  Image model   : DALL-E 3 (OpenAI)")
+    print(f"  Fallback      : none — 100% free!")
+    print(f"  Image model   : Gemini 2.5 Flash (FREE)")
     print("=" * 50)
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
