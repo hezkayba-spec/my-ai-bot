@@ -375,13 +375,6 @@ def ask_ai(session: dict, user_message: str) -> str:
 
     return "⏳ All models are busy right now. Wait a few seconds and try again!"
 
-    except requests.exceptions.Timeout:
-        return "⏳ The model is taking too long. Please try again."
-    except requests.exceptions.ConnectionError:
-        return "❌ Cannot connect to OpenRouter. Check your internet connection."
-    except Exception as e:
-        return f"❌ Error: {e}"
-
 
 # ─────────────────────────────────────────────
 #  TELEGRAM COMMANDS
