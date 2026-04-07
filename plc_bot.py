@@ -3,7 +3,7 @@
   AI Super Assistant — Telegram Bot + OpenRouter (FREE)
   Supports: PDF, Images, Word (.docx), Text, and more
   Image Generation: OpenAI DALL-E 3
-  Model: qwen/qwen3-235b-a22b:free (100% free, always on)
+  Text fallback: GPT-4o-mini (OpenAI) — always available
 =============================================================
 
 REQUIREMENTS:
@@ -30,6 +30,7 @@ HOW TO USE ON TELEGRAM:
 
 import os
 import io
+import time
 import logging
 import requests
 
@@ -69,25 +70,20 @@ except ImportError:
     print("WARNING: openai not installed. Run: pip install openai")
 
 
-# ─────────────────────────────────────────────
-#  CONFIGURATION — fill in your keys here
-# ─────────────────────────────────────────────
+# ---------------------------------------------
+#  CONFIGURATION
+# ---------------------------------------------
 
-# From @BotFather on Telegram
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
-
-# From openrouter.ai (free account, no credit card needed)
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "YOUR_OPENROUTER_KEY_HERE")
-
-# From platform.openai.com — used only for image generation (DALL-E 3)
-OPENAI_KEY = os.environ.get("OPENAI_KEY", "YOUR_OPENAI_KEY_HERE")
+OPENAI_KEY     = os.environ.get("OPENAI_KEY",     "YOUR_OPENAI_KEY_HERE")
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL          = "qwen/qwen3-235b-a22b:free"   # Free & very powerful
+MODEL          = "qwen/qwen3-235b-a22b:free"
 
-MAX_FILE_CHARS   = 12000   # Max characters extracted per file
-MAX_CONTEXT_DOCS = 5       # Max files kept in memory per user
-MAX_HISTORY_MSGS = 10      # Max conversation turns kept per user
+MAX_FILE_CHARS   = 12000
+MAX_CONTEXT_DOCS = 5
+MAX_HISTORY_MSGS = 10
 
 SYSTEM_PROMPT = """Industrial Electrician AI Assistant (Telegram Bot Script Optimized)
 ROLE
@@ -101,9 +97,9 @@ Your job is to:
 Stay focused. Be precise. Be structured."""
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 #  LOGGING
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -112,18 +108,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 #  USER SESSIONS
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 user_sessions: dict = {}
 
 def get_session(user_id: int) -> dict:
     if user_id not in user_sessions:
-        user_sessions[user_id] = {
-            "history":   [],
-            "documents": [],
-        }
+        user_sessions[user_id] = {"history": [], "documents": []}
     return user_sessions[user_id]
 
 def build_document_context(session: dict) -> str:
@@ -136,9 +129,9 @@ def build_document_context(session: dict) -> str:
     return "\n".join(parts)
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 #  FILE EXTRACTION
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 def extract_pdf(file_bytes: bytes) -> str:
     if not PDF_SUPPORT:
@@ -186,7 +179,6 @@ def extract_text(file_bytes: bytes) -> str:
 
 def extract_file(file_bytes: bytes, filename: str) -> str:
     ext = os.path.splitext(filename.lower())[1]
-
     if ext == ".pdf":
         content = extract_pdf(file_bytes)
     elif ext in (".docx", ".doc"):
@@ -195,20 +187,17 @@ def extract_file(file_bytes: bytes, filename: str) -> str:
         content = extract_image(file_bytes)
     else:
         content = extract_text(file_bytes)
-
     if len(content) > MAX_FILE_CHARS:
         content = content[:MAX_FILE_CHARS] + f"\n\n[... truncated at {MAX_FILE_CHARS} characters ...]"
-
     return content
 
 
-# ─────────────────────────────────────────────
-#  OPENROUTER API CALL (text)
-# ─────────────────────────────────────────────
+# ---------------------------------------------
+#  ASK AI — free models first, GPT-4o-mini fallback
+# ---------------------------------------------
 
 def ask_ai(session: dict, user_message: str) -> str:
     doc_context = build_document_context(session)
-
     system_content = SYSTEM_PROMPT
     if doc_context:
         system_content += f"\n\n{doc_context}"
@@ -217,56 +206,72 @@ def ask_ai(session: dict, user_message: str) -> str:
     messages += session["history"]
     messages.append({"role": "user", "content": user_message})
 
-    # Try these free models in order if one is busy
-    models_to_try = [
+    # Step 1 — Try 7 free OpenRouter models, twice, before giving up
+    free_models = [
         "qwen/qwen3-235b-a22b:free",
         "qwen/qwen3.6-plus:free",
         "meta-llama/llama-3.3-70b-instruct:free",
+        "deepseek/deepseek-chat-v3-0324:free",
+        "mistralai/mistral-7b-instruct:free",
+        "google/gemma-3-27b-it:free",
+        "nousresearch/hermes-3-llama-3.1-405b:free",
     ]
 
-    for model in models_to_try:
+    for attempt in range(2):
+        if attempt == 1:
+            time.sleep(4)
+        for model in free_models:
+            try:
+                resp = requests.post(
+                    OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"model": model, "messages": messages, "stream": False},
+                    timeout=60,
+                )
+                if resp.status_code == 429:
+                    time.sleep(1)
+                    continue
+                if resp.status_code >= 500:
+                    continue
+                resp.raise_for_status()
+                text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                if text:
+                    return text
+            except Exception:
+                continue
+
+    # Step 2 — All free models failed: fall back to GPT-4o-mini (your existing OpenAI key)
+    # Almost always online, costs fractions of a cent per message
+    if OPENAI_AVAILABLE and OPENAI_KEY != "YOUR_OPENAI_KEY_HERE":
         try:
-            response = requests.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "stream": False,
-                },
-                timeout=120
+            logger.info("Free models exhausted — switching to gpt-4o-mini fallback")
+            client = openai.OpenAI(api_key=OPENAI_KEY)
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                timeout=60,
             )
-            if response.status_code == 429:
-                continue  # this model is busy, try next one
-            response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
+            text = resp.choices[0].message.content.strip()
+            if text:
+                return text
+        except Exception as e:
+            logger.error(f"GPT-4o-mini fallback failed: {e}")
 
-        except requests.exceptions.Timeout:
-            continue
-        except Exception:
-            continue
-
-    return "All models are busy right now. Wait a few seconds and try again!"
+    return "All models are currently unavailable. Please try again in a moment!"
 
 
-# ─────────────────────────────────────────────
-#  OPENAI IMAGE GENERATION (DALL-E 3)
-# ─────────────────────────────────────────────
+# ---------------------------------------------
+#  IMAGE GENERATION — DALL-E 3
+# ---------------------------------------------
 
 def generate_image(prompt: str) -> tuple:
-    """
-    Generate an image using OpenAI DALL-E 3.
-    Returns (image_url, revised_prompt) on success, or (None, error_message) on failure.
-    """
     if not OPENAI_AVAILABLE:
         return None, "openai package not installed. Run: pip install openai"
-
     if OPENAI_KEY == "YOUR_OPENAI_KEY_HERE":
-        return None, "OpenAI API key not configured. Set OPENAI_KEY in your environment or in the script."
-
+        return None, "OpenAI API key not configured. Set OPENAI_KEY in your environment."
     try:
         client = openai.OpenAI(api_key=OPENAI_KEY)
         response = client.images.generate(
@@ -279,7 +284,6 @@ def generate_image(prompt: str) -> tuple:
         image_url      = response.data[0].url
         revised_prompt = response.data[0].revised_prompt or prompt
         return image_url, revised_prompt
-
     except openai.AuthenticationError:
         return None, "Invalid OpenAI API key. Check your OPENAI_KEY."
     except openai.RateLimitError:
@@ -290,9 +294,9 @@ def generate_image(prompt: str) -> tuple:
         return None, f"Image generation failed: {e}"
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 #  TELEGRAM COMMANDS
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name
@@ -317,8 +321,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/files - list loaded files\n"
         "/reset - clear files and conversation\n"
         "/help  - show this help\n\n"
-        f"Text model: {MODEL}\n"
-        "Image model: DALL-E 3 (OpenAI)",
+        f"Primary model : {MODEL} (free)\n"
+        "Fallback model: gpt-4o-mini (OpenAI)\n"
+        "Image model   : DALL-E 3 (OpenAI)",
     )
 
 async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -338,54 +343,38 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Reset done! All files and conversation cleared.")
 
 async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /image <prompt> — generate an image with DALL-E 3."""
     user_input = " ".join(context.args).strip() if context.args else ""
-
     if not user_input:
         await update.message.reply_text(
             "Please provide a description after /image\n"
             "Example: /image a detailed wiring diagram of a 3-phase motor starter"
         )
         return
-
     await update.message.reply_text(f"Generating image for: {user_input}\nThis may take up to 20 seconds...")
-
     image_url, info = generate_image(user_input)
-
     if image_url is None:
         await update.message.reply_text(f"Image generation failed: {info}")
         return
-
-    # Download the image and send it as a Telegram photo
     try:
-        img_response = requests.get(image_url, timeout=60)
-        img_response.raise_for_status()
-        img_bytes = io.BytesIO(img_response.content)
+        img_resp = requests.get(image_url, timeout=60)
+        img_resp.raise_for_status()
+        img_bytes = io.BytesIO(img_resp.content)
         img_bytes.name = "generated.png"
-
-        caption = f"Generated image\nPrompt: {info[:900]}" if info != user_input else f"Prompt: {user_input[:900]}"
-
-        await update.message.reply_photo(
-            photo=img_bytes,
-            caption=caption,
-        )
+        await update.message.reply_photo(photo=img_bytes, caption=f"Prompt: {info[:900]}")
     except Exception as e:
-        # Fallback: send the URL if download fails
         await update.message.reply_text(
-            f"Image generated! View it here:\n{image_url}\n\n"
-            f"(Direct send failed: {e})"
+            f"Image generated! View it here:\n{image_url}\n\n(Direct send failed: {e})"
         )
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 #  FILE HANDLER
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id  = update.effective_user.id
     session  = get_session(user_id)
     message  = update.message
-
     tg_file  = None
     filename = "unknown"
 
@@ -409,8 +398,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     content = extract_file(file_bytes, filename)
-
     session["documents"].append({"name": filename, "content": content})
+
     if len(session["documents"]) > MAX_CONTEXT_DOCS:
         removed = session["documents"].pop(0)
         await message.reply_text(f"Removed oldest file '{removed['name']}' to free space.")
@@ -423,27 +412,22 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 #  TEXT MESSAGE HANDLER
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id   = update.effective_user.id
     session   = get_session(user_id)
     user_text = update.message.text.strip()
 
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id,
-        action="typing"
-    )
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     session["history"].append({"role": "user", "content": user_text})
-
     if len(session["history"]) > MAX_HISTORY_MSGS * 2:
         session["history"] = session["history"][-(MAX_HISTORY_MSGS * 2):]
 
     reply = ask_ai(session, user_text)
-
     session["history"].append({"role": "assistant", "content": reply})
 
     if len(reply) <= 4096:
@@ -453,16 +437,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(reply[i:i + 4096])
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 #  MAIN
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 def main():
     print("=" * 50)
     print("  AI Assistant Bot starting...")
-    print(f"  Text model : {MODEL}")
-    print(f"  Image model: DALL-E 3 (OpenAI)")
-    print(f"  Text API   : OpenRouter (free)")
+    print(f"  Primary model : {MODEL} (free)")
+    print(f"  Fallback model: gpt-4o-mini (OpenAI)")
+    print(f"  Image model   : DALL-E 3 (OpenAI)")
     print("=" * 50)
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
