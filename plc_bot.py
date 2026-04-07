@@ -2,7 +2,7 @@
 =============================================================
   AI Super Assistant — Telegram Bot + OpenRouter (FREE)
   Supports: PDF, Images, Word (.docx), Text, and more
-  Image Generation: Google Gemini 2.5 Flash (FREE)
+  Image Generation: Google Gemini 2.0 Flash (FREE)
   100% free — no paid APIs needed
 =============================================================
 
@@ -15,15 +15,16 @@ FOR IMAGE OCR — install Tesseract:
     Mac     : brew install tesseract
 
 HOW TO RUN LOCALLY:
-    1. Fill in TELEGRAM_TOKEN, OPENROUTER_KEY, and OPENAI_KEY below
+    1. Fill in TELEGRAM_TOKEN, OPENROUTER_KEY, and GEMINI_KEY below
     2. Run: python plc_bot.py
 
 HOW TO USE ON TELEGRAM:
     - Send any file (PDF, image, Word, .txt) -> bot reads it
     - Ask questions about it in plain text
-    - /image <description> -> generates an image with DALL-E 3
+    - /image <description> -> generates an image with Gemini
     /reset  -> clears all files and conversation
     /files  -> shows loaded files
+    /status -> shows which AI models are currently online
     /help   -> shows all commands
 =============================================================
 """
@@ -75,10 +76,28 @@ except ImportError:
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "YOUR_OPENROUTER_KEY_HERE")
-OPENAI_KEY     = os.environ.get("OPENAI_KEY",     "YOUR_OPENAI_KEY_HERE")
+GEMINI_KEY     = os.environ.get("GEMINI_KEY",     "YOUR_GEMINI_KEY_HERE")
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL          = "qwen/qwen3-235b-a22b:free"
+
+# Ordered list of free models — tried in sequence until one responds successfully.
+# Most reliable models are placed first; lighter fallbacks at the end.
+FREE_MODELS = [
+    # Tier 1 — best quality free models (April 2026)
+    "meta-llama/llama-4-maverick:free",               # Meta Llama 4 — best overall free model
+    "deepseek/deepseek-chat-v3-0324:free",            # DeepSeek V3 — excellent reasoning
+    "nvidia/llama-3.1-nemotron-ultra-253b-v1:free",   # NVIDIA 253B — very powerful
+    "mistralai/mistral-small-3.1-24b-instruct:free",  # Mistral Small 3.1 — fast & reliable
+    # Tier 2 — solid fallbacks
+    "meta-llama/llama-4-scout:free",                  # Meta Llama 4 Scout — lighter version
+    "qwen/qwen3-235b-a22b:free",                      # Qwen3 235B — strong multilingual
+    "google/gemma-3-27b-it:free",                     # Google Gemma 3 27B
+    "meta-llama/llama-3.3-70b-instruct:free",         # Llama 3.3 70B — proven reliable
+    # Tier 3 — lightweight always-on safety nets
+    "microsoft/phi-4:free",                           # Microsoft Phi-4 — small but capable
+    "google/gemma-3-12b-it:free",                     # Google Gemma 3 12B — very light
+    "mistralai/mistral-7b-instruct:free",             # Mistral 7B — near-always available
+]
 
 MAX_FILE_CHARS   = 12000
 MAX_CONTEXT_DOCS = 5
@@ -192,7 +211,41 @@ def extract_file(file_bytes: bytes, filename: str) -> str:
 
 
 # ---------------------------------------------
-#  ASK AI — free models first, GPT-4o-mini fallback
+#  MODEL AVAILABILITY CHECK
+# ---------------------------------------------
+
+def _is_model_response_valid(data: dict) -> tuple:
+    """
+    Returns (is_valid: bool, text: str).
+    Checks for OpenRouter error bodies and empty/error content.
+    """
+    # OpenRouter signals failure in the top-level 'error' key
+    if data.get("error"):
+        err = data["error"]
+        logger.warning(f"OpenRouter error in response body: {err}")
+        return False, ""
+
+    choices = data.get("choices", [])
+    if not choices:
+        return False, ""
+
+    text = choices[0].get("message", {}).get("content", "").strip()
+
+    # Some models return a 200 with an error string as content
+    if not text:
+        return False, ""
+
+    text_lower = text.lower()
+    error_prefixes = ("error:", "i'm sorry, i cannot", "model is currently unavailable")
+    if any(text_lower.startswith(p) for p in error_prefixes):
+        logger.warning(f"Model returned error-like content: {text[:80]}")
+        return False, ""
+
+    return True, text
+
+
+# ---------------------------------------------
+#  ASK AI — robust fallback across all free models
 # ---------------------------------------------
 
 def ask_ai(session: dict, user_message: str) -> str:
@@ -205,56 +258,71 @@ def ask_ai(session: dict, user_message: str) -> str:
     messages += session["history"]
     messages.append({"role": "user", "content": user_message})
 
-    # Step 1 — Try 7 free OpenRouter models, twice, before giving up
-    free_models = [
-        # Tier 1 — best quality free models available April 2026
-        "meta-llama/llama-4-maverick:free",       # Meta Llama 4 — best overall free model
-        "deepseek/deepseek-chat-v3-0324:free",    # DeepSeek V3 — excellent reasoning
-        "nvidia/llama-3.1-nemotron-ultra-253b-v1:free",  # NVIDIA 253B — very powerful
-        "mistralai/mistral-small-3.1-24b-instruct:free", # Mistral Small 3.1 — fast & reliable
-        # Tier 2 — solid fallbacks
-        "meta-llama/llama-4-scout:free",          # Meta Llama 4 Scout — lighter version
-        "qwen/qwen3-235b-a22b:free",              # Qwen3 235B — strong multilingual
-        "google/gemma-3-27b-it:free",             # Google Gemma 3 27B
-        "meta-llama/llama-3.3-70b-instruct:free", # Llama 3.3 70B — proven reliable
-    ]
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "Content-Type": "application/json",
+    }
 
+    # Two full passes through all models before giving up.
+    # Pass 2 waits 8 seconds first to let overloaded models recover.
     for attempt in range(2):
         if attempt == 1:
-            time.sleep(4)
-        for model in free_models:
+            logger.info("All models failed on pass 1 — waiting 8s before retry pass...")
+            time.sleep(8)
+
+        for model in FREE_MODELS:
             try:
+                logger.info(f"Trying model: {model}")
                 resp = requests.post(
                     OPENROUTER_URL,
-                    headers={
-                        "Authorization": f"Bearer {OPENROUTER_KEY}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=headers,
                     json={"model": model, "messages": messages, "stream": False},
                     timeout=60,
                 )
+
+                # Rate-limited — short wait, try next model
                 if resp.status_code == 429:
+                    logger.warning(f"{model} → 429 rate limited, skipping")
                     time.sleep(1)
                     continue
-                if resp.status_code >= 500:
+
+                # Model overloaded / unavailable
+                if resp.status_code == 503:
+                    logger.warning(f"{model} → 503 unavailable, skipping")
                     continue
-                resp.raise_for_status()
-                text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                if text:
+
+                # Any other 4xx/5xx — skip
+                if resp.status_code >= 400:
+                    logger.warning(f"{model} → HTTP {resp.status_code}, skipping")
+                    continue
+
+                data = resp.json()
+                valid, text = _is_model_response_valid(data)
+                if valid:
+                    logger.info(f"Success with model: {model}")
                     return text
-            except Exception:
+
+            except requests.exceptions.Timeout:
+                logger.warning(f"{model} → timeout, skipping")
+                continue
+            except Exception as e:
+                logger.warning(f"{model} → exception: {e}, skipping")
                 continue
 
-    return "All models are currently unavailable. Please try again in a moment!"
+    return (
+        "⚠️ All AI models are currently busy or unavailable.\n"
+        "This usually resolves itself within a minute — please try again shortly!\n\n"
+        "Tip: Use /status to see which models are online."
+    )
 
 
 # ---------------------------------------------
-#  IMAGE GENERATION — Gemini 2.5 Flash (FREE)
+#  IMAGE GENERATION — Gemini 2.0 Flash (FREE)
 # ---------------------------------------------
 
 def generate_image(prompt: str) -> tuple:
     """
-    Generate an image using Google Gemini 2.5 Flash Image — completely free.
+    Generate an image using Google Gemini 2.0 Flash — completely free.
     Get your free API key at: https://aistudio.google.com
     Returns (image_bytes, prompt) on success, or (None, error_message) on failure.
     """
@@ -269,7 +337,6 @@ def generate_image(prompt: str) -> tuple:
         response = requests.post(url, json=payload, timeout=60)
         response.raise_for_status()
         data = response.json()
-        # Extract the image bytes from the response
         for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []):
             if part.get("inlineData"):
                 import base64
@@ -283,6 +350,55 @@ def generate_image(prompt: str) -> tuple:
 
 
 # ---------------------------------------------
+#  MODEL STATUS CHECK (for /status command)
+# ---------------------------------------------
+
+def check_model_status() -> list:
+    """
+    Quickly probes each free model with a tiny prompt.
+    Returns a list of (model_short_name, status_emoji, latency_ms).
+    Runs in sequence — may take ~10-20s for many models.
+    """
+    probe_messages = [{"role": "user", "content": "Reply with one word: OK"}]
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "Content-Type": "application/json",
+    }
+    results = []
+    # Only check top 6 to keep /status fast
+    models_to_check = FREE_MODELS[:6]
+    for model in models_to_check:
+        short = model.split("/")[-1].replace(":free", "")
+        try:
+            t0 = time.time()
+            resp = requests.post(
+                OPENROUTER_URL,
+                headers=headers,
+                json={"model": model, "messages": probe_messages, "stream": False, "max_tokens": 5},
+                timeout=15,
+            )
+            latency = int((time.time() - t0) * 1000)
+            if resp.status_code == 200:
+                data = resp.json()
+                valid, _ = _is_model_response_valid(data)
+                if valid:
+                    results.append((short, "✅", latency))
+                else:
+                    results.append((short, "⚠️", latency))
+            elif resp.status_code == 429:
+                results.append((short, "🔴 rate-limited", 0))
+            elif resp.status_code == 503:
+                results.append((short, "🔴 overloaded", 0))
+            else:
+                results.append((short, f"🔴 HTTP {resp.status_code}", 0))
+        except requests.exceptions.Timeout:
+            results.append((short, "🔴 timeout", 0))
+        except Exception as e:
+            results.append((short, f"🔴 error", 0))
+    return results
+
+
+# ---------------------------------------------
 #  TELEGRAM COMMANDS
 # ---------------------------------------------
 
@@ -292,26 +408,28 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Hey {name}! I am your AI assistant.\n\n"
         "Send me any file (PDF, Word, image, text...) and ask questions about it!\n\n"
         "Commands:\n"
-        "/image <description> - generate an image with DALL-E 3\n"
-        "/files - see loaded files\n"
-        "/reset - clear everything\n"
-        "/help  - show this message",
+        "/image <description> — generate an image\n"
+        "/files  — see loaded files\n"
+        "/status — check which AI models are online\n"
+        "/reset  — clear everything\n"
+        "/help   — show this message",
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    model_list = "\n".join(f"  {i+1}. {m.split('/')[-1].replace(':free','')}" for i, m in enumerate(FREE_MODELS))
     await update.message.reply_text(
         "How to use me:\n\n"
         "1. Send a file (PDF, image, Word, .txt...)\n"
         "2. I will confirm I have read it\n"
         "3. Ask any question about it!\n\n"
         "Commands:\n"
-        "/image <description> - generate an image with DALL-E 3\n"
-        "/files - list loaded files\n"
-        "/reset - clear files and conversation\n"
-        "/help  - show this help\n\n"
-        f"Primary model : {MODEL} (free)\n"
-        "Fallback      : none (100% free)\n"
-        "Image model   : Gemini 2.5 Flash (free via Google AI Studio)",
+        "/image <description> — generate an image with Gemini\n"
+        "/files  — list loaded files\n"
+        "/status — check AI model availability\n"
+        "/reset  — clear files and conversation\n"
+        "/help   — show this help\n\n"
+        f"Free models tried in order ({len(FREE_MODELS)} total):\n{model_list}\n\n"
+        "Image model: Gemini 2.0 Flash (free via Google AI Studio)",
     )
 
 async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -329,6 +447,21 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_sessions[user_id] = {"history": [], "documents": []}
     await update.message.reply_text("Reset done! All files and conversation cleared.")
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check which free models are currently responding."""
+    await update.message.reply_text(
+        f"Checking top {min(6, len(FREE_MODELS))} models... this takes ~15 seconds ⏳"
+    )
+    results = check_model_status()
+    lines = ["🤖 Model Status:\n"]
+    for name, status, latency in results:
+        if latency > 0:
+            lines.append(f"{status} {name} ({latency}ms)")
+        else:
+            lines.append(f"{status} {name}")
+    lines.append(f"\n{len(FREE_MODELS)} total models in fallback chain.")
+    await update.message.reply_text("\n".join(lines))
 
 async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = " ".join(context.args).strip() if context.args else ""
@@ -428,9 +561,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     print("=" * 50)
     print("  AI Assistant Bot starting...")
-    print(f"  Primary model : {MODEL} (free)")
-    print(f"  Fallback      : none — 100% free!")
-    print(f"  Image model   : Gemini 2.5 Flash (FREE)")
+    print(f"  Free models in chain : {len(FREE_MODELS)}")
+    print(f"  Image model          : Gemini 2.0 Flash (FREE)")
     print("=" * 50)
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -439,6 +571,7 @@ def main():
     app.add_handler(CommandHandler("help",   cmd_help))
     app.add_handler(CommandHandler("files",  cmd_files))
     app.add_handler(CommandHandler("reset",  cmd_reset))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("image",  cmd_image))
 
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
