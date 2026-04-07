@@ -375,6 +375,7 @@ def main():
     print("  AI Assistant Bot starting...")
     print(f"  Model : {MODEL}")
     print(f"  API   : OpenRouter (free)")
+    print("=" * 50)
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
