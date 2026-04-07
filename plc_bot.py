@@ -2,11 +2,12 @@
 =============================================================
   AI Super Assistant — Telegram Bot + OpenRouter (FREE)
   Supports: PDF, Images, Word (.docx), Text, and more
-  Model: qwen/qwen3.6-plus:free (100% free, always on)
+  Image Generation: OpenAI DALL-E 3
+  Model: qwen/qwen3-235b-a22b:free (100% free, always on)
 =============================================================
 
 REQUIREMENTS:
-    pip install python-telegram-bot requests pymupdf python-docx pillow pytesseract
+    pip install python-telegram-bot requests pymupdf python-docx pillow pytesseract openai
 
 FOR IMAGE OCR — install Tesseract:
     Windows : https://github.com/UB-Mannheim/tesseract/wiki
@@ -14,15 +15,16 @@ FOR IMAGE OCR — install Tesseract:
     Mac     : brew install tesseract
 
 HOW TO RUN LOCALLY:
-    1. Fill in TELEGRAM_TOKEN and OPENROUTER_KEY below
+    1. Fill in TELEGRAM_TOKEN, OPENROUTER_KEY, and OPENAI_KEY below
     2. Run: python plc_bot.py
 
 HOW TO USE ON TELEGRAM:
-    - Send any file (PDF, image, Word, .txt) → bot reads it
-    - Then ask questions about it in plain text
-    /reset → clears all files and conversation
-    /files → shows loaded files
-    /help  → shows all commands
+    - Send any file (PDF, image, Word, .txt) -> bot reads it
+    - Ask questions about it in plain text
+    - /image <description> -> generates an image with DALL-E 3
+    /reset  -> clears all files and conversation
+    /files  -> shows loaded files
+    /help   -> shows all commands
 =============================================================
 """
 
@@ -42,14 +44,14 @@ try:
     PDF_SUPPORT = True
 except ImportError:
     PDF_SUPPORT = False
-    print("⚠️  PyMuPDF not installed. Run: pip install pymupdf")
+    print("WARNING: PyMuPDF not installed. Run: pip install pymupdf")
 
 try:
     from docx import Document as DocxDocument
     DOCX_SUPPORT = True
 except ImportError:
     DOCX_SUPPORT = False
-    print("⚠️  python-docx not installed. Run: pip install python-docx")
+    print("WARNING: python-docx not installed. Run: pip install python-docx")
 
 try:
     from PIL import Image
@@ -57,7 +59,14 @@ try:
     IMAGE_SUPPORT = True
 except ImportError:
     IMAGE_SUPPORT = False
-    print("⚠️  Pillow/pytesseract not installed. Run: pip install pillow pytesseract")
+    print("WARNING: Pillow/pytesseract not installed. Run: pip install pillow pytesseract")
+
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    print("WARNING: openai not installed. Run: pip install openai")
 
 
 # ─────────────────────────────────────────────
@@ -70,8 +79,11 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
 # From openrouter.ai (free account, no credit card needed)
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "YOUR_OPENROUTER_KEY_HERE")
 
+# From platform.openai.com — used only for image generation (DALL-E 3)
+OPENAI_KEY = os.environ.get("OPENAI_KEY", "YOUR_OPENAI_KEY_HERE")
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL          = "qwen/qwen3.6-plus:free"   # Free & very powerful
+MODEL          = "qwen/qwen3-235b-a22b:free"   # Free & very powerful
 
 MAX_FILE_CHARS   = 12000   # Max characters extracted per file
 MAX_CONTEXT_DOCS = 5       # Max files kept in memory per user
@@ -83,7 +95,9 @@ You are a specialized industrial electrician AI assistant built for a Telegram b
 Your job is to:
 * Provide accurate electrical knowledge
 * Help troubleshoot real-world problems
-...
+* Explain PLC programming, wiring diagrams, and electrical schematics
+* Answer questions about files and documents the user shares
+
 Stay focused. Be precise. Be structured."""
 
 
@@ -160,7 +174,7 @@ def extract_image(file_bytes: bytes) -> str:
         text = pytesseract.image_to_string(image, lang="nld+fra+eng")
         if text.strip():
             return f"[Text extracted from image via OCR]\n{text.strip()}"
-        return "[Image received — no readable text found. You can still ask me questions about what is in it.]"
+        return "[Image received — no readable text found. You can still ask me questions about it.]"
     except Exception as e:
         return f"[Error reading image: {e}]"
 
@@ -189,7 +203,7 @@ def extract_file(file_bytes: bytes, filename: str) -> str:
 
 
 # ─────────────────────────────────────────────
-#  OPENROUTER API CALL
+#  OPENROUTER API CALL (text)
 # ─────────────────────────────────────────────
 
 def ask_ai(session: dict, user_message: str) -> str:
@@ -205,8 +219,8 @@ def ask_ai(session: dict, user_message: str) -> str:
 
     # Try these free models in order if one is busy
     models_to_try = [
-        "qwen/qwen3.6-plus:free",
         "qwen/qwen3-235b-a22b:free",
+        "qwen/qwen3.6-plus:free",
         "meta-llama/llama-3.3-70b-instruct:free",
     ]
 
@@ -232,10 +246,48 @@ def ask_ai(session: dict, user_message: str) -> str:
 
         except requests.exceptions.Timeout:
             continue
-        except Exception as e:
+        except Exception:
             continue
 
-    return "⏳ All models are busy right now. Wait a few seconds and try again!"
+    return "All models are busy right now. Wait a few seconds and try again!"
+
+
+# ─────────────────────────────────────────────
+#  OPENAI IMAGE GENERATION (DALL-E 3)
+# ─────────────────────────────────────────────
+
+def generate_image(prompt: str) -> tuple:
+    """
+    Generate an image using OpenAI DALL-E 3.
+    Returns (image_url, revised_prompt) on success, or (None, error_message) on failure.
+    """
+    if not OPENAI_AVAILABLE:
+        return None, "openai package not installed. Run: pip install openai"
+
+    if OPENAI_KEY == "YOUR_OPENAI_KEY_HERE":
+        return None, "OpenAI API key not configured. Set OPENAI_KEY in your environment or in the script."
+
+    try:
+        client = openai.OpenAI(api_key=OPENAI_KEY)
+        response = client.images.generate(
+            model="dall-e-3",
+            prompt=prompt,
+            size="1024x1024",
+            quality="standard",
+            n=1,
+        )
+        image_url      = response.data[0].url
+        revised_prompt = response.data[0].revised_prompt or prompt
+        return image_url, revised_prompt
+
+    except openai.AuthenticationError:
+        return None, "Invalid OpenAI API key. Check your OPENAI_KEY."
+    except openai.RateLimitError:
+        return None, "OpenAI rate limit reached. Wait a moment and try again."
+    except openai.BadRequestError as e:
+        return None, f"Request rejected by OpenAI (content policy): {e}"
+    except Exception as e:
+        return None, f"Image generation failed: {e}"
 
 
 # ─────────────────────────────────────────────
@@ -245,45 +297,84 @@ def ask_ai(session: dict, user_message: str) -> str:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name
     await update.message.reply_text(
-        f"👋 Hey {name}! I'm your AI assistant.\n\n"
-        "📎 *Send me any file* — PDF, Word, image, text...\n"
-        "💬 Then *ask me anything* about it!\n\n"
+        f"Hey {name}! I am your AI assistant.\n\n"
+        "Send me any file (PDF, Word, image, text...) and ask questions about it!\n\n"
         "Commands:\n"
-        "/files — see loaded files\n"
-        "/reset — clear everything\n"
-        "/help  — show this message",
-        parse_mode="Markdown"
+        "/image <description> - generate an image with DALL-E 3\n"
+        "/files - see loaded files\n"
+        "/reset - clear everything\n"
+        "/help  - show this message",
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *How to use me:*\n\n"
-        "1️⃣ Send a file (PDF, image, Word, .txt...)\n"
-        "2️⃣ I'll confirm I've read it\n"
-        "3️⃣ Ask any question about it!\n\n"
-        "*Commands:*\n"
-        "/files — list loaded files\n"
-        "/reset — clear files + conversation\n"
-        "/help  — show this help\n\n"
-        f"*Model:* `{MODEL}`",
-        parse_mode="Markdown"
+        "How to use me:\n\n"
+        "1. Send a file (PDF, image, Word, .txt...)\n"
+        "2. I will confirm I have read it\n"
+        "3. Ask any question about it!\n\n"
+        "Commands:\n"
+        "/image <description> - generate an image with DALL-E 3\n"
+        "/files - list loaded files\n"
+        "/reset - clear files and conversation\n"
+        "/help  - show this help\n\n"
+        f"Text model: {MODEL}\n"
+        "Image model: DALL-E 3 (OpenAI)",
     )
 
 async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = get_session(update.effective_user.id)
     docs = session["documents"]
     if not docs:
-        await update.message.reply_text("📂 No files loaded yet. Send me a file!")
+        await update.message.reply_text("No files loaded yet. Send me a file!")
         return
-    lines = [f"📂 *Loaded files ({len(docs)}):*"]
+    lines = [f"Loaded files ({len(docs)}):"]
     for i, doc in enumerate(docs, 1):
         lines.append(f"{i}. {doc['name']} ({len(doc['content']):,} chars)")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_sessions[user_id] = {"history": [], "documents": []}
-    await update.message.reply_text("🔄 Reset done! All files and conversation cleared.")
+    await update.message.reply_text("Reset done! All files and conversation cleared.")
+
+async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /image <prompt> — generate an image with DALL-E 3."""
+    user_input = " ".join(context.args).strip() if context.args else ""
+
+    if not user_input:
+        await update.message.reply_text(
+            "Please provide a description after /image\n"
+            "Example: /image a detailed wiring diagram of a 3-phase motor starter"
+        )
+        return
+
+    await update.message.reply_text(f"Generating image for: {user_input}\nThis may take up to 20 seconds...")
+
+    image_url, info = generate_image(user_input)
+
+    if image_url is None:
+        await update.message.reply_text(f"Image generation failed: {info}")
+        return
+
+    # Download the image and send it as a Telegram photo
+    try:
+        img_response = requests.get(image_url, timeout=60)
+        img_response.raise_for_status()
+        img_bytes = io.BytesIO(img_response.content)
+        img_bytes.name = "generated.png"
+
+        caption = f"Generated image\nPrompt: {info[:900]}" if info != user_input else f"Prompt: {user_input[:900]}"
+
+        await update.message.reply_photo(
+            photo=img_bytes,
+            caption=caption,
+        )
+    except Exception as e:
+        # Fallback: send the URL if download fails
+        await update.message.reply_text(
+            f"Image generated! View it here:\n{image_url}\n\n"
+            f"(Direct send failed: {e})"
+        )
 
 
 # ─────────────────────────────────────────────
@@ -306,15 +397,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filename = f"photo_{tg_file.file_id[:8]}.jpg"
 
     if tg_file is None:
-        await message.reply_text("❓ I couldn't read that. Try PDF, image, Word, or text.")
+        await message.reply_text("I could not read that. Try PDF, image, Word, or text.")
         return
 
-    await message.reply_text(f"📥 Reading *{filename}*...", parse_mode="Markdown")
+    await message.reply_text(f"Reading {filename}...")
 
     try:
         file_bytes = bytes(await tg_file.download_as_bytearray())
     except Exception as e:
-        await message.reply_text(f"❌ Failed to download file: {e}")
+        await message.reply_text(f"Failed to download file: {e}")
         return
 
     content = extract_file(file_bytes, filename)
@@ -322,17 +413,13 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session["documents"].append({"name": filename, "content": content})
     if len(session["documents"]) > MAX_CONTEXT_DOCS:
         removed = session["documents"].pop(0)
-        await message.reply_text(
-            f"ℹ️ Removed oldest file *{removed['name']}* to free space.",
-            parse_mode="Markdown"
-        )
+        await message.reply_text(f"Removed oldest file '{removed['name']}' to free space.")
 
     preview = content[:300].replace("\n", " ")
     await message.reply_text(
-        f"✅ *{filename}* loaded! ({len(content):,} characters extracted)\n\n"
-        f"📄 _{preview}..._\n\n"
-        "Now ask me anything about it!",
-        parse_mode="Markdown"
+        f"{filename} loaded! ({len(content):,} characters extracted)\n\n"
+        f"Preview: {preview}...\n\n"
+        "Now ask me anything about it!"
     )
 
 
@@ -373,23 +460,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     print("=" * 50)
     print("  AI Assistant Bot starting...")
-    print(f"  Model : {MODEL}")
-    print(f"  API   : OpenRouter (free)")
+    print(f"  Text model : {MODEL}")
+    print(f"  Image model: DALL-E 3 (OpenAI)")
+    print(f"  Text API   : OpenRouter (free)")
     print("=" * 50)
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help",  cmd_help))
-    app.add_handler(CommandHandler("files", cmd_files))
-    app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("start",  cmd_start))
+    app.add_handler(CommandHandler("help",   cmd_help))
+    app.add_handler(CommandHandler("files",  cmd_files))
+    app.add_handler(CommandHandler("reset",  cmd_reset))
+    app.add_handler(CommandHandler("image",  cmd_image))
 
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     app.add_handler(MessageHandler(filters.PHOTO,        handle_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("✅ Bot is running! Open Telegram and start chatting.")
-    print("   Press Ctrl+C to stop.\n")
+    print("Bot is running! Open Telegram and start chatting.")
+    print("Press Ctrl+C to stop.\n")
 
     app.run_polling(drop_pending_updates=True)
 
