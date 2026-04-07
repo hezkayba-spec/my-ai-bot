@@ -77,25 +77,14 @@ MAX_FILE_CHARS   = 12000   # Max characters extracted per file
 MAX_CONTEXT_DOCS = 5       # Max files kept in memory per user
 MAX_HISTORY_MSGS = 10      # Max conversation turns kept per user
 
-SYSTEM_PROMPT = """You are an intelligent AI assistant helping a student in electrical automation and technical education.
-
-Your expertise includes:
-- PLC programming: LOGO!, Siemens S7, Allen-Bradley
-- Grafcet / SFC diagrams (niveau 1 and 2)
-- FBD, LAD, STL, SCL programming languages
-- Circuit design, switchboard wiring, 24V DC systems
-- QElectroTech, I/O lists, RS flip-flops, Merker/flag logic
-- General technical, scientific, and educational topics
-
-When the user shares files or documents:
-1. Read and analyze the content carefully
-2. Answer any questions about it accurately and clearly
-3. Explain difficult concepts in simple terms
-4. Summarize key points when asked
-5. Help the user study or work with the material
-
-Always respond in the same language the user writes in (French, Dutch, or English).
-Be concise, practical, and helpful."""
+SYSTEM_PROMPT = """Industrial Electrician AI Assistant (Telegram Bot Script Optimized)
+ROLE
+You are a specialized industrial electrician AI assistant built for a Telegram bot.
+Your job is to:
+* Provide accurate electrical knowledge
+* Help troubleshoot real-world problems
+...
+Stay focused. Be precise. Be structured."""
 
 
 # ─────────────────────────────────────────────
@@ -214,29 +203,39 @@ def ask_ai(session: dict, user_message: str) -> str:
     messages += session["history"]
     messages.append({"role": "user", "content": user_message})
 
-    try:
-        response = requests.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": MODEL,
-                "messages": messages,
-                "stream": False,
-            },
-            timeout=120
-        )
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+    # Try these free models in order if one is busy
+    models_to_try = [
+        "qwen/qwen3.6-plus:free",
+        "qwen/qwen3-235b-a22b:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+    ]
 
-    except requests.exceptions.Timeout:
-        return "⏳ The model is taking too long. Please try again."
-    except requests.exceptions.ConnectionError:
-        return "❌ Cannot connect to OpenRouter. Check your internet connection."
-    except Exception as e:
-        return f"❌ Error: {e}"
+    for model in models_to_try:
+        try:
+            response = requests.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "stream": False,
+                },
+                timeout=120
+            )
+            if response.status_code == 429:
+                continue  # this model is busy, try next one
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+
+        except requests.exceptions.Timeout:
+            continue
+        except Exception as e:
+            continue
+
+    return "⏳ All models are busy right now. Wait a few seconds and try again!"
 
 
 # ─────────────────────────────────────────────
