@@ -1,229 +1,387 @@
-# ==============================================================
-# DOMOTEK AI — FULL ADVANCED TELEGRAM BOT (ALL FEATURES)
-# Features:
-# - File reading (PDF, DOCX, Images OCR)
-# - Real PDF generation
-# - Image generation (DALL·E via OpenAI)
-# - Diagram generation (image-based)
-# - Student UI (buttons)
-# - Memory per user
-# ==============================================================
+"""
+=============================================================
+  AI Super Assistant — Telegram Bot + OpenRouter (FREE)
+  Supports: PDF, Images, Word (.docx), Text, and more
+  Model: qwen/qwen3.6-plus:free (100% free, always on)
+=============================================================
+
+REQUIREMENTS:
+    pip install python-telegram-bot requests pymupdf python-docx pillow pytesseract
+
+FOR IMAGE OCR — install Tesseract:
+    Windows : https://github.com/UB-Mannheim/tesseract/wiki
+    Linux   : sudo apt install tesseract-ocr tesseract-ocr-nld tesseract-ocr-fra
+    Mac     : brew install tesseract
+
+HOW TO RUN LOCALLY:
+    1. Fill in TELEGRAM_TOKEN and OPENROUTER_KEY below
+    2. Run: python plc_bot.py
+
+HOW TO USE ON TELEGRAM:
+    - Send any file (PDF, image, Word, .txt) → bot reads it
+    - Then ask questions about it in plain text
+    /reset → clears all files and conversation
+    /files → shows loaded files
+    /help  → shows all commands
+=============================================================
+"""
 
 import os
 import io
 import logging
 import requests
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, MessageHandler,
-    CommandHandler, CallbackQueryHandler,
-    filters, ContextTypes
+    CommandHandler, filters, ContextTypes
 )
 
-import fitz
-from docx import Document as DocxDocument
-from PIL import Image
-import pytesseract
+try:
+    import fitz
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
+    print("⚠️  PyMuPDF not installed. Run: pip install pymupdf")
 
-from reportlab.platypus import SimpleDocTemplate, Paragraph
-from reportlab.lib.styles import getSampleStyleSheet
+try:
+    from docx import Document as DocxDocument
+    DOCX_SUPPORT = True
+except ImportError:
+    DOCX_SUPPORT = False
+    print("⚠️  python-docx not installed. Run: pip install python-docx")
 
-# ================= CONFIG =================
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_TOKEN"
-OPENROUTER_KEY = "YOUR_OPENROUTER_KEY"
-OPENAI_API_KEY = "YOUR_OPENAI_KEY"  # for images
+try:
+    from PIL import Image
+    import pytesseract
+    IMAGE_SUPPORT = True
+except ImportError:
+    IMAGE_SUPPORT = False
+    print("⚠️  Pillow/pytesseract not installed. Run: pip install pillow pytesseract")
+
+
+# ─────────────────────────────────────────────
+#  CONFIGURATION — fill in your keys here
+# ─────────────────────────────────────────────
+
+# From @BotFather on Telegram
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
+
+# From openrouter.ai (free account, no credit card needed)
+OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "YOUR_OPENROUTER_KEY_HERE")
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "qwen/qwen3.6-plus:free"
+MODEL          = "qwen/qwen3.6-plus:free"   # Free & very powerful
 
-# ================= PROMPT =================
-SYSTEM_PROMPT = """
-You are DOMOTEK, an AI teacher for beginner electrical students.
+MAX_FILE_CHARS   = 12000   # Max characters extracted per file
+MAX_CONTEXT_DOCS = 5       # Max files kept in memory per user
+MAX_HISTORY_MSGS = 10      # Max conversation turns kept per user
 
-Explain simply.
-Use structure.
-
-TITLE:
-EXPLANATION:
-STEPS:
-SAFETY:
-
-Special modes:
-PDF_CONTENT:
-IMAGE_PROMPT:
-SCHEMA:
-"""
-
-# ================= MEMORY =================
-user_memory = {}
-
-# ================= LOGGING =================
-logging.basicConfig(level=logging.INFO)
-
-# ================= FILE EXTRACTION =================
-
-def extract_pdf(file_bytes):
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    return "\n".join([p.get_text() for p in doc])
+SYSTEM_PROMPT = """Industrial Electrician AI Assistant (Telegram Bot Script Optimized)
+ROLE
+You are a specialized industrial electrician AI assistant built for a Telegram bot.
+Your job is to:
+* Provide accurate electrical knowledge
+* Help troubleshoot real-world problems
+...
+Stay focused. Be precise. Be structured."""
 
 
-def extract_docx(file_bytes):
-    doc = DocxDocument(io.BytesIO(file_bytes))
-    return "\n".join([p.text for p in doc.paragraphs])
+# ─────────────────────────────────────────────
+#  LOGGING
+# ─────────────────────────────────────────────
+
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 
-def extract_image(file_bytes):
-    image = Image.open(io.BytesIO(file_bytes))
-    return pytesseract.image_to_string(image)
+# ─────────────────────────────────────────────
+#  USER SESSIONS
+# ─────────────────────────────────────────────
+
+user_sessions: dict = {}
+
+def get_session(user_id: int) -> dict:
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {
+            "history":   [],
+            "documents": [],
+        }
+    return user_sessions[user_id]
+
+def build_document_context(session: dict) -> str:
+    if not session["documents"]:
+        return ""
+    parts = ["=== FILES THE USER SHARED ===\n"]
+    for i, doc in enumerate(session["documents"], 1):
+        parts.append(f"--- File {i}: {doc['name']} ---\n{doc['content']}\n")
+    parts.append("=== END OF FILES ===")
+    return "\n".join(parts)
 
 
-def extract_file(file_bytes, filename):
-    ext = filename.lower().split(".")[-1]
+# ─────────────────────────────────────────────
+#  FILE EXTRACTION
+# ─────────────────────────────────────────────
 
-    if ext == "pdf":
-        return extract_pdf(file_bytes)
-    elif ext in ["docx", "doc"]:
-        return extract_docx(file_bytes)
-    elif ext in ["png", "jpg", "jpeg"]:
-        return extract_image(file_bytes)
+def extract_pdf(file_bytes: bytes) -> str:
+    if not PDF_SUPPORT:
+        return "[PDF support not available — install pymupdf]"
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        pages = []
+        for num, page in enumerate(doc, 1):
+            text = page.get_text().strip()
+            if text:
+                pages.append(f"[Page {num}]\n{text}")
+        doc.close()
+        result = "\n\n".join(pages)
+        return result if result.strip() else "[PDF is image-only — no text found]"
+    except Exception as e:
+        return f"[Error reading PDF: {e}]"
+
+def extract_docx(file_bytes: bytes) -> str:
+    if not DOCX_SUPPORT:
+        return "[Word support not available — install python-docx]"
+    try:
+        doc = DocxDocument(io.BytesIO(file_bytes))
+        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        return "\n\n".join(paragraphs)
+    except Exception as e:
+        return f"[Error reading Word file: {e}]"
+
+def extract_image(file_bytes: bytes) -> str:
+    if not IMAGE_SUPPORT:
+        return "[Image OCR not available — install pillow and pytesseract]"
+    try:
+        image = Image.open(io.BytesIO(file_bytes))
+        text = pytesseract.image_to_string(image, lang="nld+fra+eng")
+        if text.strip():
+            return f"[Text extracted from image via OCR]\n{text.strip()}"
+        return "[Image received — no readable text found. You can still ask me questions about what is in it.]"
+    except Exception as e:
+        return f"[Error reading image: {e}]"
+
+def extract_text(file_bytes: bytes) -> str:
+    try:
+        return file_bytes.decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"[Error reading file: {e}]"
+
+def extract_file(file_bytes: bytes, filename: str) -> str:
+    ext = os.path.splitext(filename.lower())[1]
+
+    if ext == ".pdf":
+        content = extract_pdf(file_bytes)
+    elif ext in (".docx", ".doc"):
+        content = extract_docx(file_bytes)
+    elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp"):
+        content = extract_image(file_bytes)
     else:
-        return file_bytes.decode(errors="ignore")
+        content = extract_text(file_bytes)
 
-# ================= AI =================
+    if len(content) > MAX_FILE_CHARS:
+        content = content[:MAX_FILE_CHARS] + f"\n\n[... truncated at {MAX_FILE_CHARS} characters ...]"
 
-def ask_ai(user_id, message, context_text=""):
-    history = user_memory.get(user_id, [])
+    return content
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + context_text}]
-    messages += history
-    messages.append({"role": "user", "content": message})
 
-    response = requests.post(
-        OPENROUTER_URL,
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": MODEL,
-            "messages": messages,
-        }
+# ─────────────────────────────────────────────
+#  OPENROUTER API CALL
+# ─────────────────────────────────────────────
+
+def ask_ai(session: dict, user_message: str) -> str:
+    doc_context = build_document_context(session)
+
+    system_content = SYSTEM_PROMPT
+    if doc_context:
+        system_content += f"\n\n{doc_context}"
+
+    messages = [{"role": "system", "content": system_content}]
+    messages += session["history"]
+    messages.append({"role": "user", "content": user_message})
+
+    try:
+        response = requests.post(
+            OPENROUTER_URL,
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": MODEL,
+                "messages": messages,
+                "stream": False,
+            },
+            timeout=120
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+
+    except requests.exceptions.Timeout:
+        return "⏳ The model is taking too long. Please try again."
+    except requests.exceptions.ConnectionError:
+        return "❌ Cannot connect to OpenRouter. Check your internet connection."
+    except Exception as e:
+        return f"❌ Error: {e}"
+
+
+# ─────────────────────────────────────────────
+#  TELEGRAM COMMANDS
+# ─────────────────────────────────────────────
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.effective_user.first_name
+    await update.message.reply_text(
+        f"👋 Hey {name}! I'm your AI assistant.\n\n"
+        "📎 *Send me any file* — PDF, Word, image, text...\n"
+        "💬 Then *ask me anything* about it!\n\n"
+        "Commands:\n"
+        "/files — see loaded files\n"
+        "/reset — clear everything\n"
+        "/help  — show this message",
+        parse_mode="Markdown"
     )
 
-    reply = response.json()["choices"][0]["message"]["content"]
-
-    history.append({"role": "user", "content": message})
-    history.append({"role": "assistant", "content": reply})
-
-    user_memory[user_id] = history[-10:]
-
-    return reply
-
-# ================= IMAGE GENERATION =================
-
-def generate_image(prompt):
-    response = requests.post(
-        "https://api.openai.com/v1/images/generations",
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": "gpt-image-1",
-            "prompt": prompt,
-            "size": "1024x1024"
-        }
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 *How to use me:*\n\n"
+        "1️⃣ Send a file (PDF, image, Word, .txt...)\n"
+        "2️⃣ I'll confirm I've read it\n"
+        "3️⃣ Ask any question about it!\n\n"
+        "*Commands:*\n"
+        "/files — list loaded files\n"
+        "/reset — clear files + conversation\n"
+        "/help  — show this help\n\n"
+        f"*Model:* `{MODEL}`",
+        parse_mode="Markdown"
     )
 
-    return response.json()["data"][0]["url"]
+async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session = get_session(update.effective_user.id)
+    docs = session["documents"]
+    if not docs:
+        await update.message.reply_text("📂 No files loaded yet. Send me a file!")
+        return
+    lines = [f"📂 *Loaded files ({len(docs)}):*"]
+    for i, doc in enumerate(docs, 1):
+        lines.append(f"{i}. {doc['name']} ({len(doc['content']):,} chars)")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-# ================= UI =================
-
-def main_menu():
-    keyboard = [
-        [InlineKeyboardButton("⚙️ Motor", callback_data="motor")],
-        [InlineKeyboardButton("🔌 PLC", callback_data="plc")],
-        [InlineKeyboardButton("📐 Diagram", callback_data="diagram")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-# ================= HANDLERS =================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Welcome to DOMOTEK AI", reply_markup=main_menu())
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_sessions[user_id] = {"history": [], "documents": []}
+    await update.message.reply_text("🔄 Reset done! All files and conversation cleared.")
 
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "motor":
-        await query.message.reply_text("Ask me about motors")
-    elif query.data == "plc":
-        await query.message.reply_text("Ask me about PLC")
-    elif query.data == "diagram":
-        await query.message.reply_text("Ask for a diagram")
-
+# ─────────────────────────────────────────────
+#  FILE HANDLER
+# ─────────────────────────────────────────────
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    file = await update.message.document.get_file()
-    file_bytes = bytes(await file.download_as_bytearray())
+    user_id  = update.effective_user.id
+    session  = get_session(user_id)
+    message  = update.message
 
-    content = extract_file(file_bytes, update.message.document.file_name)
-    context.user_data["file"] = content
+    tg_file  = None
+    filename = "unknown"
 
-    await update.message.reply_text("File loaded.")
+    if message.document:
+        tg_file  = await message.document.get_file()
+        filename = message.document.file_name or "document"
+    elif message.photo:
+        tg_file  = await message.photo[-1].get_file()
+        filename = f"photo_{tg_file.file_id[:8]}.jpg"
 
+    if tg_file is None:
+        await message.reply_text("❓ I couldn't read that. Try PDF, image, Word, or text.")
+        return
+
+    await message.reply_text(f"📥 Reading *{filename}*...", parse_mode="Markdown")
+
+    try:
+        file_bytes = bytes(await tg_file.download_as_bytearray())
+    except Exception as e:
+        await message.reply_text(f"❌ Failed to download file: {e}")
+        return
+
+    content = extract_file(file_bytes, filename)
+
+    session["documents"].append({"name": filename, "content": content})
+    if len(session["documents"]) > MAX_CONTEXT_DOCS:
+        removed = session["documents"].pop(0)
+        await message.reply_text(
+            f"ℹ️ Removed oldest file *{removed['name']}* to free space.",
+            parse_mode="Markdown"
+        )
+
+    preview = content[:300].replace("\n", " ")
+    await message.reply_text(
+        f"✅ *{filename}* loaded! ({len(content):,} characters extracted)\n\n"
+        f"📄 _{preview}..._\n\n"
+        "Now ask me anything about it!",
+        parse_mode="Markdown"
+    )
+
+
+# ─────────────────────────────────────────────
+#  TEXT MESSAGE HANDLER
+# ─────────────────────────────────────────────
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_text = update.message.text
-    context_text = context.user_data.get("file", "")
+    user_id   = update.effective_user.id
+    session   = get_session(user_id)
+    user_text = update.message.text.strip()
 
-    reply = ask_ai(user_id, user_text, context_text)
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id,
+        action="typing"
+    )
 
-    # PDF
-    if reply.startswith("PDF_CONTENT:"):
-        content = reply.replace("PDF_CONTENT:", "")
+    session["history"].append({"role": "user", "content": user_text})
 
-        doc = SimpleDocTemplate("file.pdf")
-        styles = getSampleStyleSheet()
-        story = [Paragraph(line, styles["Normal"]) for line in content.split("\n")]
-        doc.build(story)
+    if len(session["history"]) > MAX_HISTORY_MSGS * 2:
+        session["history"] = session["history"][-(MAX_HISTORY_MSGS * 2):]
 
-        await update.message.reply_document(open("file.pdf", "rb"))
-        return
+    reply = ask_ai(session, user_text)
 
-    # IMAGE
-    if reply.startswith("IMAGE_PROMPT:"):
-        prompt = reply.replace("IMAGE_PROMPT:", "")
-        img_url = generate_image(prompt)
-        await update.message.reply_photo(img_url)
-        return
+    session["history"].append({"role": "assistant", "content": reply})
 
-    # SCHEMA → IMAGE
-    if reply.startswith("SCHEMA:"):
-        prompt = "Electrical diagram: " + reply.replace("SCHEMA:", "")
-        img_url = generate_image(prompt)
-        await update.message.reply_photo(img_url)
-        return
+    if len(reply) <= 4096:
+        await update.message.reply_text(reply)
+    else:
+        for i in range(0, len(reply), 4096):
+            await update.message.reply_text(reply[i:i + 4096])
 
-    await update.message.reply_text(reply)
 
-# ================= MAIN =================
+# ─────────────────────────────────────────────
+#  MAIN
+# ─────────────────────────────────────────────
 
 def main():
+    print("=" * 50)
+    print("  AI Assistant Bot starting...")
+    print(f"  Model : {MODEL}")
+    print(f"  API   : OpenRouter (free)")
+    print("=" * 50)
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help",  cmd_help))
+    app.add_handler(CommandHandler("files", cmd_files))
+    app.add_handler(CommandHandler("reset", cmd_reset))
 
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+    app.add_handler(MessageHandler(filters.PHOTO,        handle_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("DOMOTEK running...")
-    app.run_polling()
+    print("✅ Bot is running! Open Telegram and start chatting.")
+    print("   Press Ctrl+C to stop.\n")
+
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
