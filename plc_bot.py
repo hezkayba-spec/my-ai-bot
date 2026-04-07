@@ -125,33 +125,6 @@ OUTPUT RULES (CRITICAL):
 - Never go off-topic
 - Always use the correct format for the request type
 - Keep it clean, structured, and simple"""
-"""
-=============================================================
-  AI Super Assistant — Telegram Bot + OpenRouter (FREE)
-  Supports: PDF, Images, Word (.docx), Text, and more
-  Model: qwen/qwen3.6-plus:free (100% free, always on)
-=============================================================
-
-REQUIREMENTS:
-    pip install python-telegram-bot requests pymupdf python-docx pillow pytesseract
-
-FOR IMAGE OCR — install Tesseract:
-    Windows : https://github.com/UB-Mannheim/tesseract/wiki
-    Linux   : sudo apt install tesseract-ocr tesseract-ocr-nld tesseract-ocr-fra
-    Mac     : brew install tesseract
-
-HOW TO RUN LOCALLY:
-    1. Fill in TELEGRAM_TOKEN and OPENROUTER_KEY below
-    2. Run: python plc_bot.py
-
-HOW TO USE ON TELEGRAM:
-    - Send any file (PDF, image, Word, .txt) → bot reads it
-    - Then ask questions about it in plain text
-    /reset → clears all files and conversation
-    /files → shows loaded files
-    /help  → shows all commands
-=============================================================
-"""
 
 import os
 import io
