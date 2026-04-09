@@ -5,6 +5,7 @@
   Fallback : OpenRouter (11 free models)
   Files    : PDF, Images, Word (.docx), Text
   Images   : Google Gemini 2.0 Flash (free)
+  Access   : Password-protected persistent whitelist
   100% free — no paid APIs needed
 =============================================================
 
@@ -23,11 +24,19 @@ HOW TO GET YOUR FREE API KEYS:
 
 HOW TO RUN LOCALLY:
     1. Set environment variables:
-         TELEGRAM_TOKEN, GROQ_KEY, OPENROUTER_KEY, GEMINI_KEY
+         TELEGRAM_TOKEN, GROQ_KEY, OPENROUTER_KEY, GEMINI_KEY, BOT_PASSWORD
        OR fill in the fallback strings below directly.
-    2. Run: python plc_bot.py
+    2. Add your own Telegram user ID to ADMIN_IDS so you never need the password.
+       (Find your ID by messaging @userinfobot on Telegram)
+    3. Run: python plc_bot.py
+
+ACCESS SYSTEM:
+    - New users must send /unlock <password> to gain access
+    - Approved users are saved to whitelist.json and persist across restarts
+    - Admins listed in ADMIN_IDS are always allowed without a password
 
 TELEGRAM COMMANDS:
+    /unlock <password> — unlock the bot with the secret password
     /image <description> — generate an image with Gemini
     /files  — show loaded files
     /status — check which AI models are online
@@ -38,6 +47,7 @@ TELEGRAM COMMANDS:
 
 import os
 import io
+import json
 import time
 import logging
 import requests
@@ -80,34 +90,43 @@ GROQ_KEY       = os.environ.get("GROQ_KEY",       "YOUR_GROQ_KEY_HERE")
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "YOUR_OPENROUTER_KEY_HERE")
 GEMINI_KEY     = os.environ.get("GEMINI_KEY",     "YOUR_GEMINI_KEY_HERE")
 
+# ── Access control ────────────────────────────────────────────────────────────
+# The password users must send via /unlock to gain access.
+BOT_PASSWORD = os.environ.get("BOT_PASSWORD", "YOUR_SECRET_PASSWORD_HERE")
+
+# Your own Telegram user ID(s) — always allowed, no password needed.
+# Find your ID by messaging @userinfobot on Telegram.
+ADMIN_IDS: set[int] = {
+    123456789,   # ← replace with your real Telegram user ID
+}
+
+# File where approved user IDs are saved so they survive bot restarts.
+WHITELIST_FILE = "whitelist.json"
+
 # ── Groq (primary — fast LPU inference, free tier) ──────────────────────────
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 GROQ_MODELS = [
-    # Best quality first — Groq models are almost always online
-    "meta-llama/llama-4-maverick-17b-128e-instruct",  # Llama 4 Maverick — best on Groq
-    "meta-llama/llama-4-scout-17b-16e-instruct",      # Llama 4 Scout — fast & capable
-    "llama-3.3-70b-versatile",                        # Llama 3.3 70B — proven reliable
-    "llama3-70b-8192",                                # Llama 3 70B — solid fallback
-    "mixtral-8x7b-32768",                             # Mixtral 8x7B — great context window
-    "gemma2-9b-it",                                   # Gemma 2 9B — lightweight safety net
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "llama-3.3-70b-versatile",
+    "llama3-70b-8192",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
 ]
 
 # ── OpenRouter (fallback — 11 free models) ───────────────────────────────────
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 OPENROUTER_MODELS = [
-    # Tier 1
     "meta-llama/llama-4-maverick:free",
     "deepseek/deepseek-chat-v3-0324:free",
     "nvidia/llama-3.1-nemotron-ultra-253b-v1:free",
     "mistralai/mistral-small-3.1-24b-instruct:free",
-    # Tier 2
     "meta-llama/llama-4-scout:free",
     "qwen/qwen3-235b-a22b:free",
     "google/gemma-3-27b-it:free",
     "meta-llama/llama-3.3-70b-instruct:free",
-    # Tier 3 — lightweight safety nets
     "microsoft/phi-4:free",
     "google/gemma-3-12b-it:free",
     "mistralai/mistral-7b-instruct:free",
@@ -138,6 +157,41 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────
+#  WHITELIST — load / save / check
+# ─────────────────────────────────────────────
+
+def _load_whitelist() -> set[int]:
+    """Load approved user IDs from disk. Returns empty set if file doesn't exist."""
+    try:
+        with open(WHITELIST_FILE, "r") as f:
+            data = json.load(f)
+            return set(int(uid) for uid in data)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return set()
+
+def _save_whitelist(whitelist: set[int]) -> None:
+    """Persist approved user IDs to disk."""
+    try:
+        with open(WHITELIST_FILE, "w") as f:
+            json.dump(list(whitelist), f)
+    except Exception as e:
+        logger.error(f"Failed to save whitelist: {e}")
+
+# In-memory whitelist — loaded once at startup, updated on unlock
+approved_users: set[int] = _load_whitelist()
+
+def is_allowed(user_id: int) -> bool:
+    """Return True if user is an admin or has been approved via password."""
+    return user_id in ADMIN_IDS or user_id in approved_users
+
+def approve_user(user_id: int) -> None:
+    """Add user to the approved set and persist to disk."""
+    approved_users.add(user_id)
+    _save_whitelist(approved_users)
+    logger.info(f"User {user_id} approved and saved to whitelist")
 
 
 # ─────────────────────────────────────────────
@@ -225,32 +279,24 @@ def extract_file(file_bytes: bytes, filename: str) -> str:
 
 
 # ─────────────────────────────────────────────
-#  RESPONSE VALIDATION (shared by both providers)
+#  RESPONSE VALIDATION
 # ─────────────────────────────────────────────
 
 def _is_valid_response(data: dict) -> tuple:
-    """
-    Returns (is_valid: bool, text: str).
-    Works for both Groq and OpenRouter (same OpenAI-compatible format).
-    """
     if data.get("error"):
         logger.warning(f"API error in response body: {data['error']}")
         return False, ""
-
     choices = data.get("choices", [])
     if not choices:
         return False, ""
-
     text = choices[0].get("message", {}).get("content", "").strip()
     if not text:
         return False, ""
-
     text_lower = text.lower()
     error_prefixes = ("error:", "i'm sorry, i cannot", "model is currently unavailable")
     if any(text_lower.startswith(p) for p in error_prefixes):
         logger.warning(f"Model returned error-like content: {text[:80]}")
         return False, ""
-
     return True, text
 
 
@@ -259,16 +305,13 @@ def _is_valid_response(data: dict) -> tuple:
 # ─────────────────────────────────────────────
 
 def _try_groq(messages: list) -> str | None:
-    """Try all Groq models in order. Returns text on success, None if all fail."""
     if GROQ_KEY == "YOUR_GROQ_KEY_HERE":
         logger.info("Groq key not set — skipping Groq")
         return None
-
     headers = {
         "Authorization": f"Bearer {GROQ_KEY}",
         "Content-Type": "application/json",
     }
-
     for model in GROQ_MODELS:
         try:
             logger.info(f"[Groq] Trying: {model}")
@@ -276,30 +319,21 @@ def _try_groq(messages: list) -> str | None:
                 GROQ_URL,
                 headers=headers,
                 json={"model": model, "messages": messages, "stream": False},
-                timeout=30,  # Groq is fast — 30s is plenty
+                timeout=30,
             )
-
             if resp.status_code == 429:
-                logger.warning(f"[Groq] {model} → 429 rate limited")
                 time.sleep(1)
                 continue
-            if resp.status_code == 503:
-                logger.warning(f"[Groq] {model} → 503 unavailable")
-                continue
             if resp.status_code >= 400:
-                logger.warning(f"[Groq] {model} → HTTP {resp.status_code}")
                 continue
-
             valid, text = _is_valid_response(resp.json())
             if valid:
                 logger.info(f"[Groq] Success with: {model}")
                 return text
-
         except requests.exceptions.Timeout:
             logger.warning(f"[Groq] {model} → timeout")
         except Exception as e:
             logger.warning(f"[Groq] {model} → {e}")
-
     logger.warning("[Groq] All models failed")
     return None
 
@@ -309,21 +343,17 @@ def _try_groq(messages: list) -> str | None:
 # ─────────────────────────────────────────────
 
 def _try_openrouter(messages: list) -> str | None:
-    """Try all OpenRouter free models across 2 passes. Returns text on success, None if all fail."""
     if OPENROUTER_KEY == "YOUR_OPENROUTER_KEY_HERE":
         logger.info("OpenRouter key not set — skipping")
         return None
-
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
         "Content-Type": "application/json",
     }
-
     for attempt in range(2):
         if attempt == 1:
             logger.info("[OpenRouter] Pass 1 failed — waiting 8s before retry...")
             time.sleep(8)
-
         for model in OPENROUTER_MODELS:
             try:
                 logger.info(f"[OpenRouter] Trying: {model}")
@@ -333,28 +363,19 @@ def _try_openrouter(messages: list) -> str | None:
                     json={"model": model, "messages": messages, "stream": False},
                     timeout=60,
                 )
-
                 if resp.status_code == 429:
-                    logger.warning(f"[OpenRouter] {model} → 429 rate limited")
                     time.sleep(1)
                     continue
-                if resp.status_code == 503:
-                    logger.warning(f"[OpenRouter] {model} → 503 unavailable")
+                if resp.status_code in (503,) or resp.status_code >= 400:
                     continue
-                if resp.status_code >= 400:
-                    logger.warning(f"[OpenRouter] {model} → HTTP {resp.status_code}")
-                    continue
-
                 valid, text = _is_valid_response(resp.json())
                 if valid:
                     logger.info(f"[OpenRouter] Success with: {model}")
                     return text
-
             except requests.exceptions.Timeout:
                 logger.warning(f"[OpenRouter] {model} → timeout")
             except Exception as e:
                 logger.warning(f"[OpenRouter] {model} → {e}")
-
     logger.warning("[OpenRouter] All models failed")
     return None
 
@@ -368,23 +389,19 @@ def ask_ai(session: dict, user_message: str) -> str:
     system_content = SYSTEM_PROMPT
     if doc_context:
         system_content += f"\n\n{doc_context}"
-
     messages = [{"role": "system", "content": system_content}]
     messages += session["history"]
     messages.append({"role": "user", "content": user_message})
 
-    # 1️⃣ Try Groq first (fast, stable)
     result = _try_groq(messages)
     if result:
         return result
 
-    # 2️⃣ Fall back to OpenRouter
     logger.info("Groq unavailable — falling back to OpenRouter...")
     result = _try_openrouter(messages)
     if result:
         return result
 
-    # 3️⃣ Both providers exhausted
     return (
         "⚠️ All AI providers are currently busy or unavailable.\n"
         "This usually resolves within a minute — please try again shortly!\n\n"
@@ -428,23 +445,17 @@ def generate_image(prompt: str) -> tuple:
 # ─────────────────────────────────────────────
 
 def check_model_status() -> list:
-    """Probe top 3 Groq + top 3 OpenRouter models. Returns list of (label, emoji, latency_ms)."""
     probe = [{"role": "user", "content": "Reply with one word: OK"}]
     results = []
 
-    # Check top 3 Groq models
     if GROQ_KEY != "YOUR_GROQ_KEY_HERE":
-        groq_headers = {
-            "Authorization": f"Bearer {GROQ_KEY}",
-            "Content-Type": "application/json",
-        }
+        groq_headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
         for model in GROQ_MODELS[:3]:
             label = f"[Groq] {model.split('/')[-1]}"
             try:
                 t0 = time.time()
                 resp = requests.post(
-                    GROQ_URL,
-                    headers=groq_headers,
+                    GROQ_URL, headers=groq_headers,
                     json={"model": model, "messages": probe, "stream": False, "max_tokens": 5},
                     timeout=10,
                 )
@@ -463,19 +474,14 @@ def check_model_status() -> list:
     else:
         results.append(("[Groq]", "⚙️ key not set", 0))
 
-    # Check top 3 OpenRouter models
     if OPENROUTER_KEY != "YOUR_OPENROUTER_KEY_HERE":
-        or_headers = {
-            "Authorization": f"Bearer {OPENROUTER_KEY}",
-            "Content-Type": "application/json",
-        }
+        or_headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"}
         for model in OPENROUTER_MODELS[:3]:
             label = f"[OR] {model.split('/')[-1].replace(':free', '')}"
             try:
                 t0 = time.time()
                 resp = requests.post(
-                    OPENROUTER_URL,
-                    headers=or_headers,
+                    OPENROUTER_URL, headers=or_headers,
                     json={"model": model, "messages": probe, "stream": False, "max_tokens": 5},
                     timeout=15,
                 )
@@ -504,19 +510,66 @@ def check_model_status() -> list:
 # ─────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.effective_user.first_name
-    await update.message.reply_text(
-        f"Hey {name}! I am your AI assistant.\n\n"
-        "Send me any file (PDF, Word, image, text...) and ask questions about it!\n\n"
-        "Commands:\n"
-        "/image <description> — generate an image\n"
-        "/files  — see loaded files\n"
-        "/status — check which AI models are online\n"
-        "/reset  — clear everything\n"
-        "/help   — show this message",
-    )
+    user_id = update.effective_user.id
+    name    = update.effective_user.first_name
+
+    if is_allowed(user_id):
+        await update.message.reply_text(
+            f"Hey {name}! I am your AI assistant. ✅\n\n"
+            "Send me any file (PDF, Word, image, text...) and ask questions about it!\n\n"
+            "Commands:\n"
+            "/image <description> — generate an image\n"
+            "/files  — see loaded files\n"
+            "/status — check which AI models are online\n"
+            "/reset  — clear everything\n"
+            "/help   — show this message",
+        )
+    else:
+        await update.message.reply_text(
+            f"Hey {name}! This bot is password-protected. 🔒\n\n"
+            "Send /unlock <password> to get access.\n"
+            "Example: /unlock mysecretword"
+        )
+
+async def cmd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /unlock <password> — approve user if password matches."""
+    user_id = update.effective_user.id
+    name    = update.effective_user.first_name
+
+    # Already approved
+    if is_allowed(user_id):
+        await update.message.reply_text("You already have access! ✅")
+        return
+
+    # Check password
+    provided = " ".join(context.args).strip() if context.args else ""
+    if not provided:
+        await update.message.reply_text(
+            "Please provide the password after /unlock\n"
+            "Example: /unlock mysecretword"
+        )
+        return
+
+    if provided == BOT_PASSWORD:
+        approve_user(user_id)
+        logger.info(f"User {name} ({user_id}) unlocked the bot")
+        await update.message.reply_text(
+            f"✅ Access granted, {name}! Welcome!\n\n"
+            "Send me any file (PDF, Word, image, text...) and ask questions about it!\n"
+            "Use /help to see all commands."
+        )
+    else:
+        logger.warning(f"Failed unlock attempt by {name} ({user_id}) — wrong password")
+        await update.message.reply_text("❌ Wrong password. Please try again.")
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        await update.message.reply_text(
+            "🔒 This bot is password-protected.\n"
+            "Send /unlock <password> to get access."
+        )
+        return
     groq_list = "\n".join(f"  {i+1}. {m.split('/')[-1]}" for i, m in enumerate(GROQ_MODELS))
     await update.message.reply_text(
         "How to use me:\n\n"
@@ -536,7 +589,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    session = get_session(update.effective_user.id)
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        await update.message.reply_text("🔒 Send /unlock <password> to get access.")
+        return
+    session = get_session(user_id)
     docs = session["documents"]
     if not docs:
         await update.message.reply_text("No files loaded yet. Send me a file!")
@@ -548,10 +605,17 @@ async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        await update.message.reply_text("🔒 Send /unlock <password> to get access.")
+        return
     user_sessions[user_id] = {"history": [], "documents": []}
     await update.message.reply_text("Reset done! All files and conversation cleared.")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        await update.message.reply_text("🔒 Send /unlock <password> to get access.")
+        return
     await update.message.reply_text("Checking models across both providers... ⏳ (~15 seconds)")
     results = check_model_status()
     lines = ["🤖 AI Provider Status:\n"]
@@ -564,6 +628,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        await update.message.reply_text("🔒 Send /unlock <password> to get access.")
+        return
     user_input = " ".join(context.args).strip() if context.args else ""
     if not user_input:
         await update.message.reply_text(
@@ -589,7 +657,11 @@ async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id  = update.effective_user.id
+    user_id = update.effective_user.id
+    if not is_allowed(user_id):
+        await update.message.reply_text("🔒 Send /unlock <password> to get access.")
+        return
+
     session  = get_session(user_id)
     message  = update.message
     tg_file  = None
@@ -635,9 +707,16 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id   = update.effective_user.id
-    session   = get_session(user_id)
     user_text = update.message.text.strip()
 
+    if not is_allowed(user_id):
+        await update.message.reply_text(
+            "🔒 This bot is password-protected.\n"
+            "Send /unlock <password> to get access."
+        )
+        return
+
+    session = get_session(user_id)
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     session["history"].append({"role": "user", "content": user_text})
@@ -664,11 +743,15 @@ def main():
     print(f"  Primary  : Groq ⚡ ({len(GROQ_MODELS)} models)")
     print(f"  Fallback : OpenRouter 🔄 ({len(OPENROUTER_MODELS)} free models)")
     print(f"  Images   : Gemini 2.0 Flash (FREE)")
+    print(f"  Access   : Password-protected whitelist 🔒")
+    print(f"  Approved : {len(approved_users)} user(s) loaded from {WHITELIST_FILE}")
+    print(f"  Admins   : {len(ADMIN_IDS)} admin(s) configured")
     print("=" * 55)
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start",  cmd_start))
+    app.add_handler(CommandHandler("unlock", cmd_unlock))
     app.add_handler(CommandHandler("help",   cmd_help))
     app.add_handler(CommandHandler("files",  cmd_files))
     app.add_handler(CommandHandler("reset",  cmd_reset))
