@@ -635,39 +635,35 @@ def ask_ai(session: dict, user_message: str, lang: str = "en") -> str:
 
 
 # ─────────────────────────────────────────────
-#  IMAGE GENERATION — Gemini (fixed model name)
+#  IMAGE GENERATION — Pollinations AI (free, no key, no region restrictions)
 # ─────────────────────────────────────────────
 
 def generate_image(prompt: str) -> tuple:
-    if GEMINI_KEY == "YOUR_GEMINI_KEY_HERE":
-        return None, "Gemini key not configured. Get a free key at aistudio.google.com"
-    # Try the current working model names in order
-    gemini_models = [
-        "gemini-2.0-flash-preview-image-generation",
-        "gemini-2.0-flash-exp",
-        "gemini-2.0-flash",
-    ]
-    for model in gemini_models:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
-            payload = {
-                "contents": [{"parts": [{"text": f"Generate a clear technical image of: {prompt}"}]}],
-                "generationConfig": {"responseModalities": ["image", "text"]},
-            }
-            resp = requests.post(url, json=payload, timeout=60)
-            if resp.status_code == 404:
-                continue  # Try next model name
-            resp.raise_for_status()
-            for part in resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", []):
-                if part.get("inlineData"):
-                    import base64
-                    return base64.b64decode(part["inlineData"]["data"]), prompt
-        except requests.exceptions.Timeout:
-            return None, "Gemini timed out. Try again."
-        except Exception as e:
-            logger.warning(f"Gemini {model} failed: {e}")
-            continue
-    return None, "Image generation failed. Make sure your Gemini key is valid and has image generation enabled at aistudio.google.com"
+    """
+    Generate an image using Pollinations AI — completely free, no API key needed,
+    works worldwide including Belgium/EU.
+    Uses the Flux model which produces high quality technical images.
+    """
+    try:
+        import urllib.parse
+        # Clean up prompt and encode it for URL
+        encoded = urllib.parse.quote(prompt)
+        # Pollinations URL — width/height/model/seed params optional but help quality
+        url = (
+            f"https://image.pollinations.ai/prompt/{encoded}"
+            f"?width=1024&height=768&model=flux&nologo=true&enhance=true"
+        )
+        logger.info(f"Pollinations request: {url}")
+        resp = requests.get(url, timeout=60)
+        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
+            return resp.content, prompt
+        logger.warning(f"Pollinations returned {resp.status_code}: {resp.text[:200]}")
+        return None, f"Image service returned an error (status {resp.status_code}). Try again!"
+    except requests.exceptions.Timeout:
+        return None, "Image generation timed out. Try again!"
+    except Exception as e:
+        logger.warning(f"Pollinations failed: {e}")
+        return None, f"Image generation failed: {e}"
 
 
 # ─────────────────────────────────────────────
@@ -1259,7 +1255,7 @@ def main():
     print(f"  Primary  : Groq ⚡ ({len(GROQ_MODELS)} models)")
     print(f"  Fallback : OpenRouter 🔄 ({len(OPENROUTER_MODELS)} models)")
     print(f"  Voice    : Groq Whisper (speech-to-text)")
-    print(f"  Images   : Gemini 2.0 Flash")
+    print(f"  Images   : Pollinations AI (free, no key needed)")
     print(f"  Languages: EN / NL / FR / DE")
     print(f"  Toolkit  : Ohm / Cable / Motor / IP")
     print(f"  Access   : Password whitelist 🔒")
