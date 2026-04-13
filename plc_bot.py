@@ -992,6 +992,66 @@ async def tg_handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session["history"].append({"role": "assistant", "content": reply})
     await tg_send(update, reply)
 
+async def tg_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    if not tg_is_allowed(uid):
+        await update.message.reply_text(UI["en"]["locked"]); return
+    lang = get_lang(uid)
+    help_msgs = {
+        "fr": (
+            "⚡ Assistant Électricien Industriel\n\n"
+            "/start — accueil\n"
+            "/ask — poser une question électrique\n"
+            "/define — chercher un terme\n"
+            "/toolkit — calculateurs (Ohm, câble, moteur, IP)\n"
+            "/image — générer une image\n"
+            "/language — changer de langue\n"
+            "/status — état des modèles IA\n"
+            "/reset — effacer ta session\n"
+            "/help — cette aide"
+        ),
+        "nl": (
+            "⚡ Industriële Elektricien AI\n\n"
+            "/start — welkomstscherm\n"
+            "/ask — vraag stellen\n"
+            "/define — term opzoeken\n"
+            "/toolkit — calculators (Ohm, kabel, motor, IP)\n"
+            "/image — afbeelding genereren\n"
+            "/language — taal wijzigen\n"
+            "/status — model status\n"
+            "/reset — sessie wissen\n"
+            "/help — deze hulp"
+        ),
+        "en": (
+            "⚡ Industrial Electrician AI\n\n"
+            "/start — home menu\n"
+            "/ask — ask a question\n"
+            "/define — look up a term\n"
+            "/toolkit — calculators (Ohm, cable, motor, IP)\n"
+            "/image — generate an image\n"
+            "/language — change language\n"
+            "/status — AI model status\n"
+            "/reset — clear session\n"
+            "/help — this help"
+        ),
+        "de": (
+            "⚡ Industrieller Elektriker KI\n\n"
+            "/start — Startbildschirm\n"
+            "/ask — Frage stellen\n"
+            "/define — Begriff nachschlagen\n"
+            "/toolkit — Rechner (Ohm, Kabel, Motor, IP)\n"
+            "/image — Bild generieren\n"
+            "/language — Sprache ändern\n"
+            "/status — Modell Status\n"
+            "/reset — Sitzung löschen\n"
+            "/help — diese Hilfe"
+        ),
+    }
+    await update.message.reply_text(
+        help_msgs.get(lang, help_msgs["en"]),
+        reply_markup=tg_main_menu(uid)
+    )
+
 def run_telegram():
     logger.info("Starting Telegram bot...")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -1004,7 +1064,7 @@ def run_telegram():
     app.add_handler(CommandHandler("reset",    tg_reset))
     app.add_handler(CommandHandler("status",   tg_status))
     app.add_handler(CommandHandler("image",    tg_image_cmd))
-    app.add_handler(CommandHandler("help",     tg_ask))  # /help shows usage
+    app.add_handler(CommandHandler("help",     tg_help))
     app.add_handler(MessageHandler(filters.Document.ALL,            tg_handle_file))
     app.add_handler(MessageHandler(filters.PHOTO,                   tg_handle_file))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO,   tg_handle_voice))
@@ -1022,132 +1082,311 @@ intents.members         = True
 
 dc_bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Default language for Discord users is French
+DC_DEFAULT_LANG = "fr"
+
+def dc_get_lang(uid: int) -> str:
+    """Get language for a Discord user — defaults to French."""
+    return user_languages.get(f"dc_{uid}", DC_DEFAULT_LANG)
+
+def dc_set_lang(uid: int, lang: str):
+    user_languages[f"dc_{uid}"] = lang
+
 def dc_has_access(member: discord.Member) -> bool:
-    """Check if member has the required role."""
     return any(r.name == DISCORD_ROLE for r in member.roles)
 
 def dc_right_channel(channel) -> bool:
-    """Check if message is in the allowed channel."""
     return channel.name == DISCORD_CHANNEL
 
-async def dc_send_long(interaction_or_channel, text: str, followup: bool = False):
-    """Send a long message split into chunks."""
-    chunks = [text[i:i+1990] for i in range(0, len(text), 1990)]
-    for idx, chunk in enumerate(chunks):
-        if hasattr(interaction_or_channel, "followup"):
-            if idx == 0 and not followup:
-                await interaction_or_channel.response.send_message(chunk)
-            else:
-                await interaction_or_channel.followup.send(chunk)
-        else:
-            await interaction_or_channel.send(chunk)
+def dc_mini_guide(lang: str) -> str:
+    """Short command guide shown after every response."""
+    guides = {
+        "fr": (
+            "\n\n─────────────────\n"
+            "💡 Commandes disponibles:\n"
+            "/ask — poser une question\n"
+            "/define — chercher un terme\n"
+            "/toolkit — calculateurs (Ohm, câble, moteur, IP)\n"
+            "/image — générer une image\n"
+            "/language — changer de langue\n"
+            "/reset — effacer la session\n"
+            "/status — état des modèles IA"
+        ),
+        "nl": (
+            "\n\n─────────────────\n"
+            "💡 Beschikbare commando's:\n"
+            "/ask — vraag stellen\n"
+            "/define — term opzoeken\n"
+            "/toolkit — calculators (Ohm, kabel, motor, IP)\n"
+            "/image — afbeelding genereren\n"
+            "/language — taal wijzigen\n"
+            "/reset — sessie wissen\n"
+            "/status — status AI modellen"
+        ),
+        "en": (
+            "\n\n─────────────────\n"
+            "💡 Available commands:\n"
+            "/ask — ask a question\n"
+            "/define — look up a term\n"
+            "/toolkit — calculators (Ohm, cable, motor, IP)\n"
+            "/image — generate an image\n"
+            "/language — change language\n"
+            "/reset — clear session\n"
+            "/status — AI model status"
+        ),
+        "de": (
+            "\n\n─────────────────\n"
+            "💡 Verfügbare Befehle:\n"
+            "/ask — Frage stellen\n"
+            "/define — Begriff nachschlagen\n"
+            "/toolkit — Rechner (Ohm, Kabel, Motor, IP)\n"
+            "/image — Bild generieren\n"
+            "/language — Sprache ändern\n"
+            "/reset — Sitzung zurücksetzen\n"
+            "/status — KI-Modell Status"
+        ),
+    }
+    return guides.get(lang, guides["fr"])
 
-# Discord slash commands
+async def dc_reply(interaction: discord.Interaction, text: str, lang: str, ephemeral: bool = False):
+    """Send reply + mini guide, split into chunks if needed."""
+    full   = text + dc_mini_guide(lang)
+    chunks = [full[i:i+1990] for i in range(0, len(full), 1990)]
+    for idx, chunk in enumerate(chunks):
+        if idx == 0:
+            if interaction.response.is_done():
+                await interaction.followup.send(chunk, ephemeral=ephemeral)
+            else:
+                await interaction.response.send_message(chunk, ephemeral=ephemeral)
+        else:
+            await interaction.followup.send(chunk)
+
+async def dc_check(interaction: discord.Interaction) -> bool:
+    """Access + channel guard. Returns True if OK."""
+    if not dc_right_channel(interaction.channel):
+        await interaction.response.send_message(
+            f"⚡ Utilise le canal #{DISCORD_CHANNEL} pour ce bot.", ephemeral=True)
+        return False
+    if not dc_has_access(interaction.user):
+        await interaction.response.send_message(
+            f"🔒 Tu as besoin du rôle '{DISCORD_ROLE}' pour utiliser ce bot.", ephemeral=True)
+        return False
+    return True
+
+# ── on_ready — force global sync ─────────────
+
 @dc_bot.event
 async def on_ready():
-    await dc_bot.tree.sync()
-    logger.info(f"Discord bot ready as {dc_bot.user}")
+    try:
+        synced = await dc_bot.tree.sync()
+        logger.info(f"Discord bot ready as {dc_bot.user} — {len(synced)} slash commands synced")
+    except Exception as e:
+        logger.error(f"Discord sync failed: {e}")
 
-@dc_bot.tree.command(name="ask", description="Ask an electrical or PLC question")
-@app_commands.describe(question="Your electrical question")
+# ── /start ────────────────────────────────────
+
+@dc_bot.tree.command(name="start", description="Démarrer le bot / Start the bot")
+async def dc_start(interaction: discord.Interaction):
+    if not await dc_check(interaction): return
+    uid  = interaction.user.id
+    lang = dc_get_lang(uid)
+    name = interaction.user.display_name
+    welcome_msgs = {
+        "fr": f"👋 Salut {name}! Bienvenue!\n\n⚡ Assistant Électricien Industriel\n\nJe suis là pour tout ce qui touche à l'électricité — câblage, automates, schémas! 💪",
+        "nl": f"👋 Hé {name}! Welkom!\n\n⚡ Industriële Elektricien AI\n\nIk help je met alles rond elektriciteit — bedrading, PLC's, schema's! 💪",
+        "en": f"👋 Hey {name}! Welcome!\n\n⚡ Industrial Electrician AI\n\nI'm here for all things electrical — wiring, PLCs, schematics! 💪",
+        "de": f"👋 Hey {name}! Willkommen!\n\n⚡ Industrieller Elektriker KI\n\nIch helfe dir mit Elektrotechnik — Verdrahtung, SPS, Schaltpläne! 💪",
+    }
+    await dc_reply(interaction, welcome_msgs.get(lang, welcome_msgs["fr"]), lang)
+
+# ── /language ─────────────────────────────────
+
+@dc_bot.tree.command(name="language", description="Changer la langue / Change language")
+@app_commands.describe(langue="Choisir une langue / Choose a language")
+@app_commands.choices(langue=[
+    app_commands.Choice(name="🇫🇷 Français",    value="fr"),
+    app_commands.Choice(name="🇬🇧 English",      value="en"),
+    app_commands.Choice(name="🇳🇱 Nederlands",   value="nl"),
+    app_commands.Choice(name="🇩🇪 Deutsch",      value="de"),
+])
+async def dc_language(interaction: discord.Interaction, langue: str):
+    if not await dc_check(interaction): return
+    uid = interaction.user.id
+    dc_set_lang(uid, langue)
+    confirmations = {
+        "fr": "✅ Langue réglée sur Français! 🇫🇷",
+        "nl": "✅ Taal ingesteld op Nederlands! 🇳🇱",
+        "en": "✅ Language set to English! 🇬🇧",
+        "de": "✅ Sprache auf Deutsch eingestellt! 🇩🇪",
+    }
+    await dc_reply(interaction, confirmations[langue], langue)
+
+# ── /ask ──────────────────────────────────────
+
+@dc_bot.tree.command(name="ask", description="Poser une question électrique / Ask an electrical question")
+@app_commands.describe(question="Ta question / Your question")
 async def dc_ask(interaction: discord.Interaction, question: str):
-    if not dc_right_channel(interaction.channel):
-        await interaction.response.send_message(f"⚡ Please use #{DISCORD_CHANNEL} for this bot.", ephemeral=True); return
-    if not dc_has_access(interaction.user):
-        await interaction.response.send_message(f"🔒 You need the '{DISCORD_ROLE}' role to use this bot.", ephemeral=True); return
+    if not await dc_check(interaction): return
     await interaction.response.defer()
     uid     = interaction.user.id
+    lang    = dc_get_lang(uid)
     session = get_dc_session(uid)
     session["history"].append({"role": "user", "content": question})
     if len(session["history"]) > MAX_HISTORY_MSGS * 2:
         session["history"] = session["history"][-(MAX_HISTORY_MSGS * 2):]
-    reply = clean_reply(ask_ai(session, question, "en"))
+    reply = clean_reply(ask_ai(session, question, lang))
     session["history"].append({"role": "assistant", "content": reply})
-    await dc_send_long(interaction, reply, followup=True)
+    await dc_reply(interaction, reply, lang)
 
-@dc_bot.tree.command(name="define", description="Look up an electrical term in the dictionary")
-@app_commands.describe(term="The term to look up")
-async def dc_define(interaction: discord.Interaction, term: str):
-    if not dc_right_channel(interaction.channel):
-        await interaction.response.send_message(f"⚡ Please use #{DISCORD_CHANNEL}.", ephemeral=True); return
-    if not dc_has_access(interaction.user):
-        await interaction.response.send_message(f"🔒 You need the '{DISCORD_ROLE}' role.", ephemeral=True); return
+# ── /define ───────────────────────────────────
+
+@dc_bot.tree.command(name="define", description="Chercher un terme électrique / Look up an electrical term")
+@app_commands.describe(terme="Le terme à chercher / The term to look up")
+async def dc_define(interaction: discord.Interaction, terme: str):
+    if not await dc_check(interaction): return
     await interaction.response.defer()
-    result = lookup_term(term)
+    uid  = interaction.user.id
+    lang = dc_get_lang(uid)
+    result = lookup_term(terme)
     if result:
-        await interaction.followup.send(f"📖 **{term.upper()}**\n\n{result}")
+        await dc_reply(interaction, f"📖 {terme.upper()}\n\n{result}", lang)
     else:
-        session = get_dc_session(interaction.user.id)
-        reply   = clean_reply(ask_ai(session, f"Define this electrical term briefly: {term}", "en"))
-        await interaction.followup.send(f"📖 {term.upper()}\n\n{reply}")
+        session = get_dc_session(uid)
+        reply   = clean_reply(ask_ai(session, f"Define this electrical term briefly: {terme}", lang))
+        await dc_reply(interaction, f"📖 {terme.upper()}\n\n{reply}", lang)
 
-@dc_bot.tree.command(name="toolkit", description="Open the electrician toolkit calculators")
-@app_commands.describe(tool="Choose a tool", value="Input values (e.g. U=230 R=47)")
-@app_commands.choices(tool=[
-    app_commands.Choice(name="⚡ Ohm's Law (U=230 R=47)", value="ohm"),
-    app_commands.Choice(name="🔌 Cable Guide (16A)",      value="cable"),
-    app_commands.Choice(name="🔧 Motor Power (U=400 I=10 pf=0.85)", value="motor"),
-    app_commands.Choice(name="🛡️ IP Code (IP65)",         value="ip"),
+# ── /toolkit ──────────────────────────────────
+
+@dc_bot.tree.command(name="toolkit", description="Calculateurs électricien / Electrician calculators")
+@app_commands.describe(outil="Choisir un outil / Choose a tool", valeurs="Valeurs d'entrée / Input values (e.g. U=230 R=47)")
+@app_commands.choices(outil=[
+    app_commands.Choice(name="⚡ Loi d'Ohm — U=230 R=47",           value="ohm"),
+    app_commands.Choice(name="🔌 Section câble — 16A",               value="cable"),
+    app_commands.Choice(name="🔧 Puissance moteur — U=400 I=10 pf=0.85", value="motor"),
+    app_commands.Choice(name="🛡️ Code IP — IP65",                    value="ip"),
 ])
-async def dc_toolkit(interaction: discord.Interaction, tool: str, value: str):
-    if not dc_right_channel(interaction.channel):
-        await interaction.response.send_message(f"⚡ Please use #{DISCORD_CHANNEL}.", ephemeral=True); return
-    if not dc_has_access(interaction.user):
-        await interaction.response.send_message(f"🔒 You need the '{DISCORD_ROLE}' role.", ephemeral=True); return
-    result = run_toolkit(tool, value)
-    await interaction.response.send_message(result)
+async def dc_toolkit(interaction: discord.Interaction, outil: str, valeurs: str):
+    if not await dc_check(interaction): return
+    lang   = dc_get_lang(interaction.user.id)
+    result = run_toolkit(outil, valeurs)
+    await dc_reply(interaction, result, lang)
 
-@dc_bot.tree.command(name="image", description="Generate an electrical diagram or image")
-@app_commands.describe(prompt="Describe what to generate")
-async def dc_image(interaction: discord.Interaction, prompt: str):
-    if not dc_right_channel(interaction.channel):
-        await interaction.response.send_message(f"⚡ Please use #{DISCORD_CHANNEL}.", ephemeral=True); return
-    if not dc_has_access(interaction.user):
-        await interaction.response.send_message(f"🔒 You need the '{DISCORD_ROLE}' role.", ephemeral=True); return
+# ── /image ────────────────────────────────────
+
+@dc_bot.tree.command(name="image", description="Générer une image / Generate an image")
+@app_commands.describe(description="Description de l'image / Image description")
+async def dc_image(interaction: discord.Interaction, description: str):
+    if not await dc_check(interaction): return
     await interaction.response.defer()
-    await interaction.followup.send("🖼️ Generating your image... ~20 seconds!")
-    img_bytes, info = generate_image(prompt)
+    lang = dc_get_lang(interaction.user.id)
+    wait_msgs = {"fr": "🖼️ Génération en cours... ~20 secondes!",
+                 "nl": "🖼️ Afbeelding genereren... ~20 seconden!",
+                 "en": "🖼️ Generating image... ~20 seconds!",
+                 "de": "🖼️ Bild wird generiert... ~20 Sekunden!"}
+    await interaction.followup.send(wait_msgs.get(lang, wait_msgs["fr"]))
+    img_bytes, info = generate_image(description)
     if img_bytes is None:
-        await interaction.followup.send(f"❌ {info}"); return
+        err_msgs = {"fr": f"❌ Génération échouée: {info}",
+                    "nl": f"❌ Genereren mislukt: {info}",
+                    "en": f"❌ Generation failed: {info}",
+                    "de": f"❌ Generierung fehlgeschlagen: {info}"}
+        await interaction.followup.send(err_msgs.get(lang, err_msgs["fr"]))
+        return
     await interaction.followup.send(
-        f"📐 {prompt[:900]}",
+        f"📐 {description[:900]}",
         file=discord.File(io.BytesIO(img_bytes), filename="generated.png")
     )
+    await interaction.followup.send(dc_mini_guide(lang))
 
-@dc_bot.tree.command(name="status", description="Check AI model availability")
+# ── /status ───────────────────────────────────
+
+@dc_bot.tree.command(name="status", description="État des modèles IA / AI model status")
 async def dc_status(interaction: discord.Interaction):
-    if not dc_right_channel(interaction.channel):
-        await interaction.response.send_message(f"⚡ Please use #{DISCORD_CHANNEL}.", ephemeral=True); return
-    if not dc_has_access(interaction.user):
-        await interaction.response.send_message(f"🔒 You need the '{DISCORD_ROLE}' role.", ephemeral=True); return
+    if not await dc_check(interaction): return
     await interaction.response.defer()
-    await interaction.followup.send(check_model_status())
+    lang = dc_get_lang(interaction.user.id)
+    await dc_reply(interaction, check_model_status(), lang)
 
-@dc_bot.tree.command(name="reset", description="Clear your conversation session")
+# ── /reset ────────────────────────────────────
+
+@dc_bot.tree.command(name="reset", description="Effacer la session / Clear session")
 async def dc_reset(interaction: discord.Interaction):
-    if not dc_right_channel(interaction.channel):
-        await interaction.response.send_message(f"⚡ Please use #{DISCORD_CHANNEL}.", ephemeral=True); return
+    if not await dc_check(interaction): return
     uid = interaction.user.id
-    discord_sessions[uid]     = {"history": [], "documents": []}
-    user_toolkit_mode[uid]    = None
-    await interaction.response.send_message("🔄 Session cleared! Fresh start. 👍")
+    lang = dc_get_lang(uid)
+    discord_sessions[uid]  = {"history": [], "documents": []}
+    user_toolkit_mode[uid] = None
+    reset_msgs = {"fr": "🔄 Session effacée! Nouveau départ. 👍",
+                  "nl": "🔄 Sessie gewist! Frisse start. 👍",
+                  "en": "🔄 Session cleared! Fresh start. 👍",
+                  "de": "🔄 Sitzung gelöscht! Frischer Start. 👍"}
+    await dc_reply(interaction, reset_msgs.get(lang, reset_msgs["fr"]), lang)
 
-@dc_bot.tree.command(name="help", description="Show all available commands")
+# ── /help ─────────────────────────────────────
+
+@dc_bot.tree.command(name="help", description="Aide / Help")
 async def dc_help(interaction: discord.Interaction):
+    lang = dc_get_lang(interaction.user.id)
+    help_msgs = {
+        "fr": (
+            "⚡ Assistant Électricien Industriel\n\n"
+            "/start — accueil\n"
+            "/ask — poser une question électrique\n"
+            "/define — chercher un terme dans le dictionnaire\n"
+            "/toolkit — calculateurs (Loi d'Ohm, câble, moteur, IP)\n"
+            "/image — générer un schéma ou une image\n"
+            "/language — changer de langue\n"
+            "/status — état des modèles IA\n"
+            "/reset — effacer ta session\n"
+            "/help — cette aide\n\n"
+            f"🔒 Rôle requis: {DISCORD_ROLE} | 📍 Canal: #{DISCORD_CHANNEL}"
+        ),
+        "nl": (
+            "⚡ Industriële Elektricien AI\n\n"
+            "/start — welkomstscherm\n"
+            "/ask — elektrische vraag stellen\n"
+            "/define — term opzoeken in woordenboek\n"
+            "/toolkit — calculators (Ohm, kabel, motor, IP)\n"
+            "/image — afbeelding of schema genereren\n"
+            "/language — taal wijzigen\n"
+            "/status — AI model status\n"
+            "/reset — sessie wissen\n"
+            "/help — deze hulp\n\n"
+            f"🔒 Vereiste rol: {DISCORD_ROLE} | 📍 Kanaal: #{DISCORD_CHANNEL}"
+        ),
+        "en": (
+            "⚡ Industrial Electrician AI\n\n"
+            "/start — welcome screen\n"
+            "/ask — ask an electrical question\n"
+            "/define — look up a term in the dictionary\n"
+            "/toolkit — calculators (Ohm, cable, motor, IP)\n"
+            "/image — generate a diagram or image\n"
+            "/language — change language\n"
+            "/status — AI model status\n"
+            "/reset — clear your session\n"
+            "/help — this help\n\n"
+            f"🔒 Required role: {DISCORD_ROLE} | 📍 Channel: #{DISCORD_CHANNEL}"
+        ),
+        "de": (
+            "⚡ Industrieller Elektriker KI\n\n"
+            "/start — Willkommensbildschirm\n"
+            "/ask — elektrische Frage stellen\n"
+            "/define — Begriff im Wörterbuch nachschlagen\n"
+            "/toolkit — Rechner (Ohm, Kabel, Motor, IP)\n"
+            "/image — Schaltplan oder Bild generieren\n"
+            "/language — Sprache ändern\n"
+            "/status — KI-Modell Status\n"
+            "/reset — Sitzung zurücksetzen\n"
+            "/help — diese Hilfe\n\n"
+            f"🔒 Erforderliche Rolle: {DISCORD_ROLE} | 📍 Kanal: #{DISCORD_CHANNEL}"
+        ),
+    }
     await interaction.response.send_message(
-        "⚡ **Industrial Electrician AI — Commands**\n\n"
-        "/ask <question> — ask a technical question\n"
-        "/define <term> — look up a term in the dictionary\n"
-        "/toolkit — run a calculator (Ohm, Cable, Motor, IP)\n"
-        "/image <description> — generate a wiring diagram or image\n"
-        "/status — check AI model availability\n"
-        "/reset — clear your session\n"
-        "/help — show this message\n\n"
-        f"🔒 Requires role: **{DISCORD_ROLE}** | 📍 Channel: **#{DISCORD_CHANNEL}**",
-        ephemeral=True
+        help_msgs.get(lang, help_msgs["fr"]), ephemeral=True
     )
 
-# Also respond to plain messages in the allowed channel
+# ── Plain text messages ───────────────────────
+
 @dc_bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -1156,20 +1395,20 @@ async def on_message(message: discord.Message):
         return
     if not dc_has_access(message.author):
         return
-    # Ignore slash command invocations
     if message.content.startswith("/") or message.content.startswith("!"):
         await dc_bot.process_commands(message)
         return
-    # Treat plain text as a question
     async with message.channel.typing():
         uid     = message.author.id
+        lang    = dc_get_lang(uid)
         session = get_dc_session(uid)
         session["history"].append({"role": "user", "content": message.content})
         if len(session["history"]) > MAX_HISTORY_MSGS * 2:
             session["history"] = session["history"][-(MAX_HISTORY_MSGS * 2):]
-        reply = clean_reply(ask_ai(session, message.content, "en"))
+        reply = clean_reply(ask_ai(session, message.content, lang))
         session["history"].append({"role": "assistant", "content": reply})
-        for chunk in [reply[i:i+1990] for i in range(0, len(reply), 1990)]:
+        full = reply + dc_mini_guide(lang)
+        for chunk in [full[i:i+1990] for i in range(0, len(full), 1990)]:
             await message.channel.send(chunk)
 
 def run_discord():
