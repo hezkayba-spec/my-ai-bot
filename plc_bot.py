@@ -1053,7 +1053,10 @@ async def tg_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 def run_telegram():
+    import asyncio
     logger.info("Starting Telegram bot...")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start",    tg_start))
     app.add_handler(CommandHandler("unlock",   tg_unlock))
@@ -1069,7 +1072,7 @@ def run_telegram():
     app.add_handler(MessageHandler(filters.PHOTO,                   tg_handle_file))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO,   tg_handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg_handle_text))
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, close_loop=False)
 
 
 # ═════════════════════════════════════════════
@@ -1149,9 +1152,8 @@ def dc_mini_guide(lang: str) -> str:
     return guides.get(lang, guides["fr"])
 
 async def dc_reply(interaction: discord.Interaction, text: str, lang: str, ephemeral: bool = False):
-    """Send reply + mini guide, split into chunks if needed."""
-    full   = text + dc_mini_guide(lang)
-    chunks = [full[i:i+1990] for i in range(0, len(full), 1990)]
+    """Send reply split into chunks if needed. Guide only shown via /help."""
+    chunks = [text[i:i+1990] for i in range(0, len(text), 1990)]
     for idx, chunk in enumerate(chunks):
         if idx == 0:
             if interaction.response.is_done():
@@ -1223,13 +1225,22 @@ async def dc_language(interaction: discord.Interaction, langue: str):
 
 # ── /ask ──────────────────────────────────────
 
-@dc_bot.tree.command(name="ask", description="Poser une question électrique / Ask an electrical question")
-@app_commands.describe(question="Ta question / Your question")
-async def dc_ask(interaction: discord.Interaction, question: str):
+@dc_bot.tree.command(name="ask", description="Poser une question / Ask a question (ou tape directement dans le canal)")
+@app_commands.describe(question="Ta question / Your question (optionnel — tu peux aussi juste écrire dans le canal)")
+async def dc_ask(interaction: discord.Interaction, question: str = ""):
     if not await dc_check(interaction): return
+    lang = dc_get_lang(interaction.user.id)
+    if not question.strip():
+        tips = {
+            "fr": "💬 Tu peux juste écrire ta question directement dans le canal — pas besoin de /ask!",
+            "nl": "💬 Je kan gewoon je vraag typen in het kanaal — /ask is niet nodig!",
+            "en": "💬 You can just type your question directly in the channel — no need for /ask!",
+            "de": "💬 Du kannst deine Frage einfach direkt im Kanal schreiben — /ask ist nicht nötig!",
+        }
+        await interaction.response.send_message(tips.get(lang, tips["fr"]), ephemeral=True)
+        return
     await interaction.response.defer()
     uid     = interaction.user.id
-    lang    = dc_get_lang(uid)
     session = get_dc_session(uid)
     session["history"].append({"role": "user", "content": question})
     if len(session["history"]) > MAX_HISTORY_MSGS * 2:
@@ -1296,7 +1307,6 @@ async def dc_image(interaction: discord.Interaction, description: str):
         f"📐 {description[:900]}",
         file=discord.File(io.BytesIO(img_bytes), filename="generated.png")
     )
-    await interaction.followup.send(dc_mini_guide(lang))
 
 # ── /status ───────────────────────────────────
 
@@ -1407,8 +1417,7 @@ async def on_message(message: discord.Message):
             session["history"] = session["history"][-(MAX_HISTORY_MSGS * 2):]
         reply = clean_reply(ask_ai(session, message.content, lang))
         session["history"].append({"role": "assistant", "content": reply})
-        full = reply + dc_mini_guide(lang)
-        for chunk in [full[i:i+1990] for i in range(0, len(full), 1990)]:
+        for chunk in [reply[i:i+1990] for i in range(0, len(reply), 1990)]:
             await message.channel.send(chunk)
 
 def run_discord():
@@ -1432,27 +1441,22 @@ def main():
     print(f"  DC Role  : {DISCORD_ROLE} | Channel: #{DISCORD_CHANNEL}")
     print("=" * 55)
 
-    threads = []
-
+    # Telegram runs in its own thread with its own event loop
     if TELEGRAM_TOKEN != "YOUR_TELEGRAM_TOKEN_HERE":
         tg_thread = threading.Thread(target=run_telegram, daemon=True)
         tg_thread.start()
-        threads.append(tg_thread)
         logger.info("Telegram thread started")
 
+    # Discord runs on the main thread (requires main event loop)
     if DISCORD_TOKEN != "YOUR_DISCORD_TOKEN_HERE":
-        dc_thread = threading.Thread(target=run_discord, daemon=True)
-        dc_thread.start()
-        threads.append(dc_thread)
-        logger.info("Discord thread started")
-
-    if not threads:
+        logger.info("Starting Discord on main thread...")
+        dc_bot.run(DISCORD_TOKEN)
+    elif TELEGRAM_TOKEN != "YOUR_TELEGRAM_TOKEN_HERE":
+        # Only Telegram — keep main thread alive
+        print("Telegram bot running! Press Ctrl+C to stop.\n")
+        tg_thread.join()
+    else:
         print("⚠️  No bot tokens configured! Set TELEGRAM_TOKEN and/or DISCORD_TOKEN.")
-        return
-
-    print("Both bots running! Press Ctrl+C to stop.\n")
-    for thread in threads:
-        thread.join()
 
 
 if __name__ == "__main__":
