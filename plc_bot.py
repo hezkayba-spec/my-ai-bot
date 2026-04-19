@@ -55,6 +55,10 @@ import time
 import logging
 import threading
 import requests
+from gtts import gTTS
+import asyncio
+import discord.opus
+
 
 # ── Imports Telegram ──────────────────────────
 from telegram import Update, ReplyKeyboardMarkup
@@ -66,7 +70,7 @@ from telegram.ext import (
 # ── Imports Discord ───────────────────────────
 import discord
 from discord.ext import commands
-from discord import app_commands
+from discord import app_commands, FFmpegPCMAudio, PCMVolumeTransformer
 
 # ── Support de fichiers optionnel ─────────────────────
 try:
@@ -684,6 +688,56 @@ async def dc_status(interaction: discord.Interaction):
     text += f"🟢 OpenRouter: En ligne" if or_ok else f"🔴 OpenRouter: Hors ligne"
     await dc_reply(interaction, text, lang, ephemeral=True)
 
+@dc_bot.tree.command(name="join", description="Rejoindre votre salon vocal actuel")
+async def dc_join(interaction: discord.Interaction):
+    if not await dc_check(interaction): return
+    if not interaction.user.voice:
+        await interaction.response.send_message("❌ Vous devez d'abord rejoindre un salon vocal.", ephemeral=True)
+        return
+    
+    channel = interaction.user.voice.channel
+    try:
+        await channel.connect()
+        await interaction.response.send_message(f"✅ J'ai rejoint le salon vocal : **{channel.name}**")
+    except discord.ClientException:
+        await interaction.response.send_message("❌ Je suis déjà dans un salon vocal.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Erreur de connexion : {e}", ephemeral=True)
+
+@dc_bot.tree.command(name="leave", description="Quitter le salon vocal")
+async def dc_leave(interaction: discord.Interaction):
+    if not await dc_check(interaction): return
+    if interaction.guild.voice_client:
+        await interaction.guild.voice_client.disconnect()
+        await interaction.response.send_message("👋 J'ai quitté le salon vocal.")
+    else:
+        await interaction.response.send_message("❌ Je ne suis pas dans un salon vocal.", ephemeral=True)
+
+async def speak_text(voice_client, text: str, lang: str = "fr"):
+    if not voice_client or not voice_client.is_connected():
+        return
+    
+    # Nettoyer le texte pour la synthèse vocale (enlever les emojis, etc.)
+    clean_text = re.sub(r'[^\w\s.,!?\'"-]', '', text)
+    if not clean_text.strip():
+        return
+
+    try:
+        # Générer l'audio avec gTTS
+        tts = gTTS(text=clean_text, lang=lang, slow=False)
+        filename = f"response_{int(time.time())}.mp3"
+        tts.save(filename)
+        
+        # Attendre que le bot ait fini de parler s'il parle déjà
+        while voice_client.is_playing():
+            await asyncio.sleep(1)
+            
+        # Jouer l'audio
+        source = FFmpegPCMAudio(filename)
+        voice_client.play(source, after=lambda e: os.remove(filename) if os.path.exists(filename) else None)
+    except Exception as e:
+        logger.error(f"Erreur TTS: {e}")
+
 @dc_bot.tree.command(name="help", description="Afficher toutes les commandes disponibles")
 async def dc_help(interaction: discord.Interaction):
     if not await dc_check(interaction): return
@@ -693,6 +747,8 @@ async def dc_help(interaction: discord.Interaction):
         "**Commandes disponibles:**\n" 
         "/ask — lancer un débat\n" 
         "/image — générer une image\n" 
+        "/join — rejoindre votre salon vocal\n"
+        "/leave — quitter le salon vocal\n"
         "/reset — effacer la session\n" 
         "/status — vérifier l'état des modèles\n" 
         "/help — afficher cette aide"
@@ -727,6 +783,10 @@ async def on_message(message):
     async with message.channel.typing():
         reply = clean_reply(ask_ai(session, query, lang))
         await message.reply(reply)
+        
+        # Si le bot est dans un salon vocal, il lit la réponse
+        if message.guild.voice_client:
+            await speak_text(message.guild.voice_client, reply, lang)
 
 
 # ═════════════════════════════════════════════
@@ -770,4 +830,5 @@ if __name__ == "__main__":
 
     if TELEGRAM_TOKEN == "YOUR_TELEGRAM_TOKEN_HERE" and DISCORD_TOKEN == "YOUR_DISCORD_TOKEN_HERE":
         print("\n⚠️ Veuillez définir TELEGRAM_TOKEN ou DISCORD_TOKEN pour démarrer un bot.")
+
 
