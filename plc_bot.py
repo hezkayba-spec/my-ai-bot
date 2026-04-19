@@ -12,7 +12,7 @@
 =============================================================
 
 REQUIREMENTS:
-    pip install python-telegram-bot requests pymupdf python-docx pillow pytesseract pydub discord.py
+    pip install python-telegram-bot requests pymupdf python-docx pillow pytesseract pydub discord.py elevenlabs
 
 NIXPACKS (Railway):
     Créez nixpacks.toml avec: nixPkgs = ["ffmpeg", "tesseract", "python311"]
@@ -26,6 +26,7 @@ VARIABLES D'ENVIRONNEMENT:
     ADMIN_ID         — ID utilisateur admin Telegram (pas besoin de mot de passe)
     DISCORD_ROLE     — Nom du rôle Discord qui peut utiliser le bot (ex: "Débatteur")
     DISCORD_CHANNEL  — Nom du canal Discord où le bot répond (ex: "débat")
+    ELEVENLABS_API_KEY — Clé API ElevenLabs (TTS vocal)
 
 DISCORD SETUP:
     1. Allez sur discord.com/developers/applications
@@ -55,7 +56,10 @@ import time
 import logging
 import threading
 import requests
-from elevenlabs import generate, set_api_key, Voice, VoiceSettings
+
+# ── ElevenLabs (nouveau SDK 2025+) ────────────────────
+from elevenlabs.client import ElevenLabs
+
 import asyncio
 import discord.opus
 
@@ -97,12 +101,19 @@ except ImportError:
 #  CONFIGURATION
 # ═════════════════════════════════════════════
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
-DISCORD_TOKEN  = os.environ.get("DISCORD_TOKEN",  "YOUR_DISCORD_TOKEN_HERE")
-GROQ_KEY       = os.environ.get("GROQ_KEY",       "YOUR_GROQ_KEY_HERE")
-OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "YOUR_OPENROUTER_KEY_HERE")
-BOT_PASSWORD   = os.environ.get("BOT_PASSWORD",   "YOUR_SECRET_PASSWORD_HERE")
+TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN",     "YOUR_TELEGRAM_TOKEN_HERE")
+DISCORD_TOKEN      = os.environ.get("DISCORD_TOKEN",      "YOUR_DISCORD_TOKEN_HERE")
+GROQ_KEY           = os.environ.get("GROQ_KEY",           "YOUR_GROQ_KEY_HERE")
+OPENROUTER_KEY     = os.environ.get("OPENROUTER_KEY",     "YOUR_OPENROUTER_KEY_HERE")
+BOT_PASSWORD       = os.environ.get("BOT_PASSWORD",       "YOUR_SECRET_PASSWORD_HERE")
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "YOUR_ELEVENLABS_API_KEY_HERE")
+
+# ── Initialisation ElevenLabs (une seule fois) ────────
+eleven_client = (
+    ElevenLabs(api_key=ELEVENLABS_API_KEY)
+    if ELEVENLABS_API_KEY != "YOUR_ELEVENLABS_API_KEY_HERE"
+    else None
+)
 
 # Admin Telegram — n'a jamais besoin de mot de passe
 ADMIN_IDS: set[int] = {
@@ -110,8 +121,8 @@ ADMIN_IDS: set[int] = {
 }
 
 # Contrôle d'accès Discord
-DISCORD_ROLE    = os.environ.get("DISCORD_ROLE",    "Débatteur")   # nom du rôle sur votre serveur
-DISCORD_CHANNEL = os.environ.get("DISCORD_CHANNEL", "débat") # nom du canal (sans #)
+DISCORD_ROLE    = os.environ.get("DISCORD_ROLE",    "Débatteur")
+DISCORD_CHANNEL = os.environ.get("DISCORD_CHANNEL", "débat")
 
 WHITELIST_FILE = "whitelist.json"
 
@@ -216,8 +227,8 @@ UI = {
     },
 }
 
-user_languages:    dict = {}   # telegram user_id -> "fr"/"en"
-discord_sessions:  dict = {}   # discord user_id -> {"history": [], "documents": []}
+user_languages:    dict = {}
+discord_sessions:  dict = {}
 
 def t(user_id: int, key: str, **kwargs) -> str:
     lang = user_languages.get(user_id, "fr")
@@ -620,7 +631,7 @@ intents.members = True
 dc_bot = commands.Bot(command_prefix="!", intents=intents)
 
 def dc_get_lang(user_id: int) -> str:
-    return "fr" # Pour l'instant, Discord est uniquement en français
+    return "fr"
 
 async def dc_check(interaction: discord.Interaction) -> bool:
     if interaction.channel.name != DISCORD_CHANNEL:
@@ -695,7 +706,7 @@ async def dc_join(interaction: discord.Interaction):
     if not interaction.user.voice:
         await interaction.response.send_message("❌ Vous devez d'abord rejoindre un salon vocal.", ephemeral=True)
         return
-    
+
     channel = interaction.user.voice.channel
     try:
         await channel.connect()
@@ -714,40 +725,63 @@ async def dc_leave(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ Je ne suis pas dans un salon vocal.", ephemeral=True)
 
-async def speak_text(voice_client, text: str, lang: str = "fr"):
-    if ELEVENLABS_API_KEY != "YOUR_ELEVENLABS_API_KEY_HERE":
-        set_api_key(ELEVENLABS_API_KEY)
 
+# ═════════════════════════════════════════════
+#  SYNTHÈSE VOCALE — ElevenLabs (nouveau SDK 2025+)
+# ═════════════════════════════════════════════
+
+async def speak_text(voice_client, text: str, lang: str = "fr"):
+    """Génère de l'audio avec ElevenLabs et le joue dans le salon vocal Discord."""
+
+    # Vérifications préalables
+    if not eleven_client:
+        return
     if not voice_client or not voice_client.is_connected():
         return
-    
-    # Nettoyer le texte pour la synthèse vocale (enlever les emojis, etc.)
-    clean_text = re.sub(r'[^\w\s.,!?\'"-]', '', text)
-    if not clean_text.strip():
+
+    # Nettoyage du texte : retrait des emojis et caractères spéciaux
+    clean_text = re.sub(r'[^\w\s.,!?\'"-]', '', text).strip()
+    if not clean_text:
         return
 
+    filename = f"response_{int(time.time())}.mp3"
     try:
-        # Générer l'audio avec ElevenLabs
-        audio = generate(
+        # Génération audio via le nouveau SDK ElevenLabs
+        # Voix : Rachel (EXAVITQu4vr4xnSDxMaL) — multilingue, naturelle
+        audio_stream = eleven_client.text_to_speech.convert(
             text=clean_text,
-            voice=Voice(voice_id=
-                "21m00Tcm4TlvDq8ikWAM" if lang == "en" else "xIct0eOp02Qo8rJRid7J" # ID de voix pour l'anglais et le français (Monsieur - French)
-            ),
-            model="eleven_multilingual_v2"
+            voice_id="EXAVITQu4vr4xnSDxMaL",
+            model_id="eleven_multilingual_v2",
         )
-        filename = f"response_{int(time.time())}.mp3"
+
+        # Écriture du flux audio dans un fichier .mp3
         with open(filename, "wb") as f:
-            f.write(audio)
-        
-        # Attendre que le bot ait fini de parler s'il parle déjà
+            for chunk in audio_stream:
+                f.write(chunk)
+
+        # Attendre la fin de la lecture en cours
         while voice_client.is_playing():
-            await asyncio.sleep(1)
-            
-        # Jouer l'audio
+            await asyncio.sleep(0.5)
+
+        # Lecture dans le salon vocal — suppression du fichier après lecture
+        def after_play(error):
+            if os.path.exists(filename):
+                os.remove(filename)
+            if error:
+                logger.error(f"Erreur de lecture audio: {error}")
+
         source = FFmpegPCMAudio(filename)
-        voice_client.play(source, after=lambda e: os.remove(filename) if os.path.exists(filename) else None)
+        voice_client.play(source, after=after_play)
+
     except Exception as e:
-        logger.error(f"Erreur TTS: {e}")
+        logger.error(f"Erreur TTS ElevenLabs: {e}")
+        if os.path.exists(filename):
+            os.remove(filename)
+
+
+# ═════════════════════════════════════════════
+#  GESTIONNAIRE DE MESSAGES DISCORD
+# ═════════════════════════════════════════════
 
 @dc_bot.tree.command(name="help", description="Afficher toutes les commandes disponibles")
 async def dc_help(interaction: discord.Interaction):
@@ -755,13 +789,13 @@ async def dc_help(interaction: discord.Interaction):
     uid = interaction.user.id
     lang = dc_get_lang(uid)
     text = (
-        "**Commandes disponibles:**\n" 
-        "/ask — lancer un débat\n" 
-        "/image — générer une image\n" 
+        "**Commandes disponibles:**\n"
+        "/ask — lancer un débat\n"
+        "/image — générer une image\n"
         "/join — rejoindre votre salon vocal\n"
         "/leave — quitter le salon vocal\n"
-        "/reset — effacer la session\n" 
-        "/status — vérifier l'état des modèles\n" 
+        "/reset — effacer la session\n"
+        "/status — vérifier l'état des modèles\n"
         "/help — afficher cette aide"
     )
     await interaction.response.send_message(text, ephemeral=True)
@@ -802,7 +836,9 @@ async def on_message(message):
 
     if message.attachments:
         for attachment in message.attachments:
-            if any(attachment.filename.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp', '.pdf', '.docx', '.doc', '.txt')):
+            if any(attachment.filename.lower().endswith(ext) for ext in
+                   ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp',
+                    '.pdf', '.docx', '.doc', '.txt')):
                 async with message.channel.typing():
                     file_bytes = await attachment.read()
                     content = extract_file(file_bytes, attachment.filename)
@@ -815,7 +851,7 @@ async def on_message(message):
     async with message.channel.typing():
         reply = clean_reply(ask_ai(session, query, lang))
         await message.reply(reply)
-        
+
         # Si le bot est dans un salon vocal, il lit la réponse
         if message.guild.voice_client:
             await speak_text(message.guild.voice_client, reply, lang)
@@ -849,6 +885,7 @@ if __name__ == "__main__":
     print(f"  Support PDF  : {'✅' if PDF_SUPPORT else '❌'}")
     print(f"  Support Word : {'✅' if DOCX_SUPPORT else '❌'}")
     print(f"  Support Image: {'✅' if IMAGE_SUPPORT else '❌'}")
+    print(f"  ElevenLabs   : {'✅' if eleven_client else '❌'}")
     print(f"  Admin IDs    : {ADMIN_IDS}")
     print(f"  Utilisateurs : {len(approved_users)} approuvés")
 
@@ -862,4 +899,3 @@ if __name__ == "__main__":
 
     if TELEGRAM_TOKEN == "YOUR_TELEGRAM_TOKEN_HERE" and DISCORD_TOKEN == "YOUR_DISCORD_TOKEN_HERE":
         print("\n⚠️ Veuillez définir TELEGRAM_TOKEN ou DISCORD_TOKEN pour démarrer un bot.")
-
