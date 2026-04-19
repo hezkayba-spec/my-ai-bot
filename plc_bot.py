@@ -55,7 +55,7 @@ import time
 import logging
 import threading
 import requests
-from gtts import gTTS
+from elevenlabs import generate, set_api_key, Voice, VoiceSettings
 import asyncio
 import discord.opus
 
@@ -102,6 +102,7 @@ DISCORD_TOKEN  = os.environ.get("DISCORD_TOKEN",  "YOUR_DISCORD_TOKEN_HERE")
 GROQ_KEY       = os.environ.get("GROQ_KEY",       "YOUR_GROQ_KEY_HERE")
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "YOUR_OPENROUTER_KEY_HERE")
 BOT_PASSWORD   = os.environ.get("BOT_PASSWORD",   "YOUR_SECRET_PASSWORD_HERE")
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "YOUR_ELEVENLABS_API_KEY_HERE")
 
 # Admin Telegram — n'a jamais besoin de mot de passe
 ADMIN_IDS: set[int] = {
@@ -714,6 +715,9 @@ async def dc_leave(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Je ne suis pas dans un salon vocal.", ephemeral=True)
 
 async def speak_text(voice_client, text: str, lang: str = "fr"):
+    if ELEVENLABS_API_KEY != "YOUR_ELEVENLABS_API_KEY_HERE":
+        set_api_key(ELEVENLABS_API_KEY)
+
     if not voice_client or not voice_client.is_connected():
         return
     
@@ -723,10 +727,17 @@ async def speak_text(voice_client, text: str, lang: str = "fr"):
         return
 
     try:
-        # Générer l'audio avec gTTS
-        tts = gTTS(text=clean_text, lang=lang, slow=False)
+        # Générer l'audio avec ElevenLabs
+        audio = generate(
+            text=clean_text,
+            voice=Voice(voice_id=
+                "21m00Tcm4TlvDq8ikWAM" if lang == "en" else "xIct0eOp02Qo8rJRid7J" # ID de voix pour l'anglais et le français (Monsieur - French)
+            ),
+            model="eleven_multilingual_v2"
+        )
         filename = f"response_{int(time.time())}.mp3"
-        tts.save(filename)
+        with open(filename, "wb") as f:
+            f.write(audio)
         
         # Attendre que le bot ait fini de parler s'il parle déjà
         while voice_client.is_playing():
@@ -767,6 +778,27 @@ async def on_message(message):
     session = get_dc_session(uid)
     lang = dc_get_lang(uid)
     query = message.content
+
+    # Commandes textuelles de secours (!join, !leave)
+    if query.lower() == "!join":
+        if not message.author.voice:
+            await message.reply("❌ Vous devez d'abord rejoindre un salon vocal.")
+            return
+        channel = message.author.voice.channel
+        try:
+            await channel.connect()
+            await message.reply(f"✅ J'ai rejoint le salon vocal : **{channel.name}**")
+        except Exception as e:
+            await message.reply(f"❌ Erreur de connexion : {e}")
+        return
+
+    if query.lower() == "!leave":
+        if message.guild.voice_client:
+            await message.guild.voice_client.disconnect()
+            await message.reply("👋 J'ai quitté le salon vocal.")
+        else:
+            await message.reply("❌ Je ne suis pas dans un salon vocal.")
+        return
 
     if message.attachments:
         for attachment in message.attachments:
@@ -830,5 +862,4 @@ if __name__ == "__main__":
 
     if TELEGRAM_TOKEN == "YOUR_TELEGRAM_TOKEN_HERE" and DISCORD_TOKEN == "YOUR_DISCORD_TOKEN_HERE":
         print("\n⚠️ Veuillez définir TELEGRAM_TOKEN ou DISCORD_TOKEN pour démarrer un bot.")
-
 
